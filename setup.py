@@ -1,51 +1,32 @@
 import setuptools
 import sys
 
-try:
-    from Cython.Build import cythonize
-    USE_CYTHON = True
-except ImportError:
-    sys.exit("""Could not import Cython, which is required to build benepar extension modules.
-Please install cython and numpy prior to installing benepar.""")
-
-try:
-    import numpy as np
-except ImportError:
-    sys.exit("""Could not import numpy, which is required to build the extension modules.
-Please install cython and numpy prior to installing benepar.""")
-
-with open("README.md", "r") as f:
-    long_description = f.read()
-
-extensions = cythonize("benepar/*.pyx")
-for ext_module in extensions:
-    ext_module.include_dirs.append(np.get_include())
 
 setuptools.setup(
     name="benepar",
-    version="0.1.2",
+    version="0.2.0a0",
     author="Nikita Kitaev",
     author_email="kitaev@cs.berkeley.edu",
     description="Berkeley Neural Parser",
-    long_description=long_description,
+    long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/nikitakit/self-attentive-parser",
-    packages=setuptools.find_packages(),
-    package_data={'': ['*.pyx']},
-    ext_modules = cythonize(extensions),
+    package_dir={"": "src"},
+    packages=setuptools.find_packages("src"),
+    python_requires=">=3.7",
     classifiers=(
-        'Programming Language :: Python :: 2.7',
-        "Programming Language :: Python :: 3",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Education",
+        "Intended Audience :: Science/Research",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.7",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Text Processing :: Linguistic",
     ),
-    setup_requires = ["cython", "numpy"],
-    install_requires = ["cython", "numpy", "nltk>=3.2"],
+    install_requires = ["nltk>=3.2", "torch>=1.6.0"],
     extras_require={
-        "cpu": ["tensorflow>=1.11.0"],
-        "gpu": ["tensorflow-gpu>=1.11.0"],
         "spacy": ["spacy>=2.0.9"],
     },
 )
