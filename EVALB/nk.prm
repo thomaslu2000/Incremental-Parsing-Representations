@@ -36,7 +36,7 @@ CUTOFF_LEN 40
 ##    0: unlabeled bracketing               ##
 ##    1: labeled bracketing                 ##
 ##------------------------------------------##
-LABELED 1
+LABELED 0
 
 ##------------------------------------------##
 ## Delete labels                            ##

@@ -40,13 +40,17 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         self.d_model = hparams.d_model
 
+        self.d_cats = hparams.discrete_cats
+        # self.two_label = hparams.two_label
+
         self.char_encoder = None
         self.pretrained_model = None
         if hparams.use_chars_lstm:
             assert (
                 not hparams.use_pretrained
             ), "use_chars_lstm and use_pretrained are mutually exclusive"
-            self.retokenizer = char_lstm.RetokenizerForCharLSTM(self.char_vocab)
+            self.retokenizer = char_lstm.RetokenizerForCharLSTM(
+                self.char_vocab)
             self.char_encoder = char_lstm.CharacterLSTM(
                 max(self.char_vocab.values()) + 1,
                 hparams.d_char_emb,
@@ -58,20 +62,28 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.retokenizer = retokenization.Retokenizer(
                 hparams.pretrained_model, retain_start_stop=True
             )
-            self.pretrained_model = AutoModel.from_pretrained(hparams.pretrained_model)
+            self.pretrained_model = AutoModel.from_pretrained(
+                hparams.pretrained_model)
             d_pretrained = self.pretrained_model.config.hidden_size
 
             if hparams.use_encoder:
-                self.project_pretrained = nn.Linear(
-                    d_pretrained, hparams.d_model // 2, bias=False
-                )
+                if self.d_cats > 0:
+                    self.project_in = nn.Linear(
+                        d_pretrained, self.d_cats, bias=False)
+                    self.project_out = nn.Linear(
+                        self.d_cats, hparams.d_model // 2, bias=False)
+                else:
+                    self.project_pretrained = nn.Linear(
+                        d_pretrained, hparams.d_model // 2, bias=False
+                    )
             else:
                 self.project_pretrained = nn.Linear(
                     d_pretrained, hparams.d_model, bias=False
                 )
 
         if hparams.use_encoder:
-            self.morpho_emb_dropout = FeatureDropout(hparams.morpho_emb_dropout)
+            self.morpho_emb_dropout = FeatureDropout(
+                hparams.morpho_emb_dropout)
             self.add_timing = ConcatPositionalEncoding(
                 d_model=hparams.d_model,
                 max_len=hparams.encoder_max_len,
@@ -138,7 +150,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             return next(self.f_label.parameters()).device
 
     def parallelize(self, *args, **kwargs):
-        self.parallelized_devices = (torch.device("cuda", 0), torch.device("cuda", 1))
+        self.parallelized_devices = (torch.device(
+            "cuda", 0), torch.device("cuda", 1))
         for child in self.children():
             if child != self.pretrained_model:
                 child.to(self.output_device)
@@ -178,7 +191,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             )
             if self.f_tag is not None:
                 encoded["tag_labels"] = torch.tensor(
-                    [-100] + [self.tag_vocab[tag] for _, tag in example.pos()] + [-100]
+                    [-100] + [self.tag_vocab[tag]
+                              for _, tag in example.pos()] + [-100]
                 )
         return encoded
 
@@ -226,58 +240,105 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             res.append((len(ids), subbatch))
         return res
 
-    def forward(self, batch):
-        valid_token_mask = batch["valid_token_mask"].to(self.output_device)
+    def forward(self, batch, tau=1.0, force_cats=None):
+        categories = None
+        if force_cats is None:
+            # Begin calculating from batch
+            valid_token_mask = batch["valid_token_mask"].to(self.output_device)
 
-        if (
-            self.encoder is not None
-            and valid_token_mask.shape[1] > self.add_timing.timing_table.shape[0]
-        ):
-            raise ValueError(
-                "Sentence of length {} exceeds the maximum supported length of "
-                "{}".format(
-                    valid_token_mask.shape[1] - 2,
-                    self.add_timing.timing_table.shape[0] - 2,
+            if (
+                self.encoder is not None
+                and valid_token_mask.shape[1] > self.add_timing.timing_table.shape[0]
+            ):
+                raise ValueError(
+                    "Sentence of length {} exceeds the maximum supported length of "
+                    "{}".format(
+                        valid_token_mask.shape[1] - 2,
+                        self.add_timing.timing_table.shape[0] - 2,
+                    )
                 )
-            )
 
-        if self.char_encoder is not None:
-            assert isinstance(self.char_encoder, char_lstm.CharacterLSTM)
-            char_ids = batch["char_ids"].to(self.device)
-            extra_content_annotations = self.char_encoder(char_ids, valid_token_mask)
-        elif self.pretrained_model is not None:
-            input_ids = batch["input_ids"].to(self.device)
-            words_from_tokens = batch["words_from_tokens"].to(self.output_device)
-            pretrained_attention_mask = batch["attention_mask"].to(self.device)
+            if self.char_encoder is not None:
+                assert isinstance(self.char_encoder, char_lstm.CharacterLSTM)
+                char_ids = batch["char_ids"].to(self.device)
+                extra_content_annotations = self.char_encoder(
+                    char_ids, valid_token_mask)
+            elif self.pretrained_model is not None:
+                input_ids = batch["input_ids"].to(self.device)
+                words_from_tokens = batch["words_from_tokens"].to(
+                    self.output_device)
+                pretrained_attention_mask = batch["attention_mask"].to(
+                    self.device)
 
-            extra_kwargs = {}
-            if "token_type_ids" in batch:
-                extra_kwargs["token_type_ids"] = batch["token_type_ids"].to(self.device)
-            if "decoder_input_ids" in batch:
-                extra_kwargs["decoder_input_ids"] = batch["decoder_input_ids"].to(
-                    self.device
+                extra_kwargs = {}
+                if "token_type_ids" in batch:
+                    extra_kwargs["token_type_ids"] = batch["token_type_ids"].to(
+                        self.device)
+                if "decoder_input_ids" in batch:
+                    extra_kwargs["decoder_input_ids"] = batch["decoder_input_ids"].to(
+                        self.device
+                    )
+                    extra_kwargs["decoder_attention_mask"] = batch[
+                        "decoder_attention_mask"
+                    ].to(self.device)
+
+                pretrained_out = self.pretrained_model(
+                    input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
                 )
-                extra_kwargs["decoder_attention_mask"] = batch[
-                    "decoder_attention_mask"
-                ].to(self.device)
+                features = pretrained_out.last_hidden_state.to(
+                    self.output_device)
+                features = features[
+                    torch.arange(features.shape[0])[:, None],
+                    # Note that words_from_tokens uses index -100 for invalid positions
+                    F.relu(words_from_tokens),
+                ]
+                features.masked_fill_(~valid_token_mask[:, :, None], 0)
+                if self.encoder is not None:
+                    if self.d_cats > 0:
+                        cats = self.project_in(features)
+                        if tau > 0:
+                            # take the gumbel softmax to
+                            cats = F.gumbel_softmax(cats, tau=tau, hard=True)
+                        else:
+                            # when tau == 0, take the argmax (for deterministic testing)
+                            max_idx = torch.argmax(cats, dim=-1)
+                            cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
+                                torch.FloatTensor).to(self.output_device)
+                        categories = cats.argmax(-1).cpu().numpy()
+                        extra_content_annotations = self.project_out(cats)
+                    else:
+                        extra_content_annotations = self.project_pretrained(
+                            features)
+            # end calculating from batch
+        else:
+            # Begin forcing gumbel categories
+            assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
+            categories = force_cats
+            cats = []
+            valid_token_mask = []
+            for i, sen in enumerate(force_cats):
+                set_i = []
+                for j, cat in enumerate(sen):
+                    onehot = np.zeros(self.d_cats)
+                    onehot[cat] = 1
+                    set_i.append(onehot)
+                cats.append(set_i)
+                valid_token_mask.append([True for _ in sen])
+            cats = torch.Tensor(cats).to(self.output_device)
+            valid_token_mask = torch.BoolTensor(
+                valid_token_mask).to(self.output_device)
+            extra_content_annotations = self.project_out(cats)
 
-            pretrained_out = self.pretrained_model(
-                input_ids, attention_mask=pretrained_attention_mask, **extra_kwargs
-            )
-            features = pretrained_out.last_hidden_state.to(self.output_device)
-            features = features[
-                torch.arange(features.shape[0])[:, None],
-                # Note that words_from_tokens uses index -100 for invalid positions
-                F.relu(words_from_tokens),
-            ]
-            features.masked_fill_(~valid_token_mask[:, :, None], 0)
-            if self.encoder is not None:
-                extra_content_annotations = self.project_pretrained(features)
-
+        # below here?
         if self.encoder is not None:
-            encoder_in = self.add_timing(
-                self.morpho_emb_dropout(extra_content_annotations)
-            )
+            if self.d_cats > 0 and tau == 0:
+                # disabling dropout to get deterministic results for analysis
+                # TODO is this step needed?
+                encoder_in = self.add_timing(extra_content_annotations)
+            else:
+                encoder_in = self.add_timing(
+                    self.morpho_emb_dropout(extra_content_annotations)
+                )
 
             annotations = self.encoder(encoder_in, valid_token_mask)
             # Rearrange the annotations to ensure that the transition to
@@ -302,7 +363,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         fencepost_annotations = torch.cat(
             [
                 annotations[:, :-1, : self.d_model // 2],
-                annotations[:, 1:, self.d_model // 2 :],
+                annotations[:, 1:, self.d_model // 2:],
             ],
             -1,
         )
@@ -315,12 +376,13 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         )[:, :-1, 1:]
         span_scores = self.f_label(span_features)
         span_scores = torch.cat(
-            [span_scores.new_zeros(span_scores.shape[:-1] + (1,)), span_scores], -1
+            [span_scores.new_zeros(
+                span_scores.shape[:-1] + (1,)), span_scores], -1
         )
-        return span_scores, tag_scores
+        return span_scores, tag_scores, categories
 
-    def compute_loss(self, batch):
-        span_scores, tag_scores = self.forward(batch)
+    def compute_loss(self, batch, tau=1.0):
+        span_scores, tag_scores, categories = self.forward(batch, tau)
         span_labels = batch["span_labels"].to(span_scores.device)
         span_loss = self.criterion(span_scores, span_labels)
         # Divide by the total batch size, not by the subbatch size
@@ -339,32 +401,46 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             return span_loss + tag_loss
 
     def _parse_encoded(
-        self, examples, encoded, return_compressed=False, return_scores=False
+        self, examples, encoded, return_compressed=False, return_scores=False, return_cats=False, tau=0.0
     ):
         with torch.no_grad():
-            batch = self.pad_encoded(encoded)
-            span_scores, tag_scores = self.forward(batch)
+            if self.check_force_cats(examples):
+                span_scores, tag_scores, categories = self.forward(
+                    batch=None, force_cats=examples)
+                lengths = np.array([len(example) - 2 for example in examples])
+            else:
+                batch = self.pad_encoded(encoded)
+                span_scores, tag_scores, categories = self.forward(batch, tau)
+                lengths = batch["valid_token_mask"].sum(-1) - 2
+                lengths = lengths.to(span_scores.device)
+
             if return_scores:
                 span_scores_np = span_scores.cpu().numpy()
             else:
                 # Start/stop tokens don't count, so subtract 2
-                lengths = batch["valid_token_mask"].sum(-1) - 2
                 charts_np = self.decoder.charts_from_pytorch_scores_batched(
-                    span_scores, lengths.to(span_scores.device)
+                    span_scores, lengths
                 )
             if tag_scores is not None:
                 tag_ids_np = tag_scores.argmax(-1).cpu().numpy()
             else:
                 tag_ids_np = None
 
+        if self.check_force_cats(examples):
+            for i in range(len(examples)):
+                yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
+            return
+
         for i in range(len(encoded)):
             example_len = len(examples[i].words)
             if return_scores:
                 yield span_scores_np[i, :example_len, :example_len]
             elif return_compressed:
-                output = self.decoder.compressed_output_from_chart(charts_np[i])
+                output = self.decoder.compressed_output_from_chart(
+                    charts_np[i])
                 if tag_ids_np is not None:
-                    output = output.with_tags(tag_ids_np[i, 1 : example_len + 1])
+                    output = output.with_tags(
+                        tag_ids_np[i, 1: example_len + 1])
                 yield output
             else:
                 if tag_scores is None:
@@ -372,7 +448,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 else:
                     predicted_tags = [
                         self.tag_from_index[i]
-                        for i in tag_ids_np[i, 1 : example_len + 1]
+                        for i in tag_ids_np[i, 1: example_len + 1]
                     ]
                     leaves = [
                         (word, predicted_tag)
@@ -380,7 +456,13 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             predicted_tags, examples[i].pos()
                         )
                     ]
-                yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves)
+                if return_cats:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories[i]
+                else:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves)
+
+    def check_force_cats(self, examples):
+        return self.d_cats > 0 and isinstance(examples[0], (list, np.ndarray))
 
     def parse(
         self,
@@ -388,10 +470,15 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         return_compressed=False,
         return_scores=False,
         subbatch_max_tokens=None,
+        return_cats=False,
+        tau=0.0
     ):
         training = self.training
         self.eval()
-        encoded = [self.encode(example) for example in examples]
+        if self.check_force_cats(examples):
+            encoded = None
+        else:
+            encoded = [self.encode(example) for example in examples]
         if subbatch_max_tokens is not None:
             res = subbatching.map(
                 self._parse_encoded,
@@ -401,6 +488,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 max_cost=subbatch_max_tokens,
                 return_compressed=return_compressed,
                 return_scores=return_scores,
+                return_cats=return_cats,
+                tau=tau
             )
         else:
             res = self._parse_encoded(
@@ -408,6 +497,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 encoded,
                 return_compressed=return_compressed,
                 return_scores=return_scores,
+                return_cats=return_cats,
+                tau=tau
             )
         self.train(training)
         return list(res)

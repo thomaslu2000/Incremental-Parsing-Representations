@@ -15,6 +15,7 @@ from benepar import parse_chart
 import evaluate
 import learning_rates
 import treebanks
+from tree_transforms import collapse_unlabel_binarize
 
 
 def format_elapsed(start_time):
@@ -30,6 +31,12 @@ def format_elapsed(start_time):
 
 def make_hparams():
     return nkutil.HParams(
+        # Discrete gumbel
+        discrete_cats=0,
+        two_label=False,
+        tau=3.0,
+        anneal_rate=2e-6,
+        tau_min=0.05,
         # Data processing
         max_len_train=0,  # no length limit
         max_len_dev=0,  # no length limit
@@ -89,7 +96,6 @@ def run_train(args, hparams):
     hparams.set_from_args(args)
     print("Hyperparameters:")
     hparams.print()
-
     print("Loading training trees from {}...".format(args.train_path))
     train_treebank = treebanks.load_trees(
         args.train_path, args.train_path_text, args.text_processing
@@ -106,12 +112,20 @@ def run_train(args, hparams):
         dev_treebank = dev_treebank.filter_by_length(hparams.max_len_dev)
     print("Loaded {:,} development examples.".format(len(dev_treebank)))
 
+    if hparams.two_label:
+        for treebank in [train_treebank, dev_treebank]:
+            for parsing_example in treebank.examples:
+                parsing_example.tree = collapse_unlabel_binarize(
+                    parsing_example.tree)
+
     print("Constructing vocabularies...")
     label_vocab = decode_chart.ChartDecoder.build_vocab(train_treebank.trees)
     if hparams.use_chars_lstm:
-        char_vocab = char_lstm.RetokenizerForCharLSTM.build_vocab(train_treebank.sents)
+        char_vocab = char_lstm.RetokenizerForCharLSTM.build_vocab(
+            train_treebank.sents)
     else:
         char_vocab = None
+    print('Label Vocab Size:', len(label_vocab))
 
     tag_vocab = set()
     for tree in train_treebank.trees:
@@ -126,9 +140,11 @@ def run_train(args, hparams):
         hparams.force_root_constituent = False
     elif hparams.force_root_constituent.lower() == "auto":
         hparams.force_root_constituent = (
-            decode_chart.ChartDecoder.infer_force_root_constituent(train_treebank.trees)
+            decode_chart.ChartDecoder.infer_force_root_constituent(
+                train_treebank.trees)
         )
-        print("Set hparams.force_root_constituent to", hparams.force_root_constituent)
+        print("Set hparams.force_root_constituent to",
+              hparams.force_root_constituent)
 
     print("Initializing model...")
     parser = parse_chart.ChartParser(
@@ -186,14 +202,18 @@ def run_train(args, hparams):
         dev_predicted = parser.parse(
             dev_treebank.without_gold_annotations(),
             subbatch_max_tokens=args.subbatch_max_tokens,
+            tau=0.0
         )
-        dev_fscore = evaluate.evalb(args.evalb_dir, dev_treebank.trees, dev_predicted)
+        dev_fscore = evaluate.evalb(
+            args.evalb_dir, dev_treebank.trees, dev_predicted)
 
         print(
             "dev-fscore {} "
+            "best-dev {} "
             "dev-elapsed {} "
             "total-elapsed {}".format(
                 dev_fscore,
+                best_dev_fscore,
                 format_elapsed(dev_start_time),
                 format_elapsed(start_time),
             )
@@ -232,16 +252,20 @@ def run_train(args, hparams):
             subbatch_max_tokens=args.subbatch_max_tokens,
         ),
     )
+
+    tau = hparams.tau
+    iteration = 0
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
 
         for batch_num, batch in enumerate(data_loader, start=1):
+            iteration += 1
             optimizer.zero_grad()
             parser.train()
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
-                loss = parser.compute_loss(subbatch)
+                loss = parser.compute_loss(subbatch, tau=tau)
                 loss_value = float(loss.data.cpu().numpy())
                 batch_loss_value += loss_value
                 if loss_value > 0:
@@ -256,29 +280,35 @@ def run_train(args, hparams):
 
             optimizer.step()
 
-            print(
-                "epoch {:,} "
-                "batch {:,}/{:,} "
-                "processed {:,} "
-                "batch-loss {:.4f} "
-                "grad-norm {:.4f} "
-                "epoch-elapsed {} "
-                "total-elapsed {}".format(
-                    epoch,
-                    batch_num,
-                    int(np.ceil(len(train_treebank) / hparams.batch_size)),
-                    total_processed,
-                    batch_loss_value,
-                    grad_norm,
-                    format_elapsed(epoch_start_time),
-                    format_elapsed(start_time),
-                )
-            )
+            # print(
+            #     "epoch {:,} "
+            #     "batch {:,}/{:,} "
+            #     "processed {:,} "
+            #     "batch-loss {:.4f} "
+            #     "grad-norm {:.4f} "
+            #     "epoch-elapsed {} "
+            #     "total-elapsed {}".format(
+            #         epoch,
+            #         batch_num,
+            #         int(np.ceil(len(train_treebank) / hparams.batch_size)),
+            #         total_processed,
+            #         batch_loss_value,
+            #         grad_norm,
+            #         format_elapsed(epoch_start_time),
+            #         format_elapsed(start_time),
+            #     )
+            # )
 
             if current_processed >= check_every:
                 current_processed -= check_every
                 check_dev()
                 scheduler.step(metrics=best_dev_fscore)
+
+                if hparams.discrete_cats > 0:
+                    # Gumbel temperature annealing
+                    tau = np.maximum(
+                        hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
+                    print('setting temperature to: {:.4f}'.format(tau))
             else:
                 scheduler.step()
 
@@ -365,7 +395,8 @@ def main():
     subparser.add_argument("--numpy-seed", type=int)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--train-path", default="data/wsj/train_02-21.LDC99T42")
+    subparser.add_argument(
+        "--train-path", default="data/wsj/train_02-21.LDC99T42")
     subparser.add_argument("--train-path-text", type=str)
     subparser.add_argument("--dev-path", default="data/wsj/dev_22.LDC99T42")
     subparser.add_argument("--dev-path-text", type=str)

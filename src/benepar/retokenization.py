@@ -91,11 +91,16 @@ class Retokenizer:
             pretrained_model_name_or_path, fast=True
         )
         if not self.tokenizer.is_fast:
-            raise NotImplementedError(
-                "Converting from treebank tokenization to tokenization used by a "
-                "pre-trained model requires a 'fast' tokenizer, which appears to not "
-                "be available for this pre-trained model type."
-            )
+            print(pretrained_model_name_or_path)
+            if pretrained_model_name_or_path == 'gpt2':
+                from transformers import GPT2TokenizerFast
+                self.tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+            else:
+                raise NotImplementedError(
+                    "Converting from treebank tokenization to tokenization used by a "
+                    "pre-trained model requires a 'fast' tokenizer, which appears to not "
+                    "be available for this pre-trained model type."
+                )
         self.retain_start_stop = retain_start_stop
         self.is_t5 = "T5Tokenizer" in str(type(self.tokenizer))
         self.is_gpt2 = "GPT2Tokenizer" in str(type(self.tokenizer))
@@ -199,7 +204,8 @@ class Retokenizer:
                 )
             else:
                 example["words_from_tokens"] = (
-                    [start_token_idx] + example["words_from_tokens"] + [stop_token_idx]
+                    [start_token_idx] +
+                    example["words_from_tokens"] + [stop_token_idx]
                 )
         return example
 
