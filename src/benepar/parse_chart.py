@@ -39,6 +39,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.char_vocab = char_vocab
 
         self.d_model = hparams.d_model
+        self.pretrained_divide = hparams.pretrained_divide
 
         self.d_cats = hparams.discrete_cats
         # self.two_label = hparams.two_label
@@ -286,7 +287,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
                 )
                 features = pretrained_out.last_hidden_state.to(
-                    self.output_device)
+                    self.output_device) / self.pretrained_divide
                 features = features[
                     torch.arange(features.shape[0])[:, None],
                     # Note that words_from_tokens uses index -100 for invalid positions
@@ -500,5 +501,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 return_cats=return_cats,
                 tau=tau
             )
+            # fixing determinism bug
+            res = list(res)
         self.train(training)
-        return list(res)
+        return res

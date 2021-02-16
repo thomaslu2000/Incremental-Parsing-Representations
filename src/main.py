@@ -37,6 +37,7 @@ def make_hparams():
         tau=3.0,
         anneal_rate=2e-6,
         tau_min=0.05,
+        pretrained_divide=1.0,
         # Data processing
         max_len_train=0,  # no length limit
         max_len_dev=0,  # no length limit
