@@ -251,17 +251,17 @@ def run_train(args, hparams):
         dev_fscore = evaluate.evalb(
             args.evalb_dir, dev_treebank.trees, dev_predicted)
 
-        # print(
-        #     "dev-fscore {} "
-        #     "best-dev {} "
-        #     "dev-elapsed {} "
-        #     "total-elapsed {}".format(
-        #         dev_fscore,
-        #         best_dev_fscore,
-        #         format_elapsed(dev_start_time),
-        #         format_elapsed(start_time),
-        #     )
-        # )
+        print(
+            "dev-fscore {} "
+            "best-dev {} "
+            "dev-elapsed {} "
+            "total-elapsed {}".format(
+                dev_fscore,
+                best_dev_fscore,
+                format_elapsed(dev_start_time),
+                format_elapsed(start_time),
+            )
+        )
 
         if dev_fscore.fscore > best_dev_fscore:
             if best_dev_model_path is not None:
@@ -377,8 +377,8 @@ def run_train(args, hparams):
                             print('copying tag {} into tag {}'.format(
                                 original, replace))
 
-                        print('Dist max', np.max(dist),
-                              '| dist min', np.min(dist))
+                        # print('Dist max', np.max(dist),
+                        #       '| dist min', np.min(dist))
                         for b in new_mask:
                             if b:
                                 print("\n\n\n\n\n Mask Changed!")
