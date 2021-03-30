@@ -17,7 +17,8 @@ class FeatureDropoutFunction(torch.autograd.function.InplaceFunction):
     def forward(ctx, input, p=0.5, train=False, inplace=False):
         if p < 0 or p > 1:
             raise ValueError(
-                "dropout probability has to be between 0 and 1, but got {}".format(p)
+                "dropout probability has to be between 0 and 1, but got {}".format(
+                    p)
             )
 
         ctx.p = p
@@ -64,8 +65,10 @@ class FeatureDropout(nn.Dropout):
     def forward(self, x):
         if isinstance(x, tuple):
             x_c, x_p = x
-            x_c = FeatureDropoutFunction.apply(x_c, self.p, self.training, self.inplace)
-            x_p = FeatureDropoutFunction.apply(x_p, self.p, self.training, self.inplace)
+            x_c = FeatureDropoutFunction.apply(
+                x_c, self.p, self.training, self.inplace)
+            x_p = FeatureDropoutFunction.apply(
+                x_p, self.p, self.training, self.inplace)
             return x_c, x_p
         else:
             return FeatureDropoutFunction.apply(x, self.p, self.training, self.inplace)
@@ -103,12 +106,17 @@ class PartitionedMultiHeadAttention(nn.Module):
     ):
         super().__init__()
 
-        self.w_qkv_c = nn.Parameter(torch.Tensor(n_head, d_model // 2, 3, d_qkv // 2))
-        self.w_qkv_p = nn.Parameter(torch.Tensor(n_head, d_model // 2, 3, d_qkv // 2))
-        self.w_o_c = nn.Parameter(torch.Tensor(n_head, d_qkv // 2, d_model // 2))
-        self.w_o_p = nn.Parameter(torch.Tensor(n_head, d_qkv // 2, d_model // 2))
+        self.w_qkv_c = nn.Parameter(torch.Tensor(
+            n_head, d_model // 2, 3, d_qkv // 2))
+        self.w_qkv_p = nn.Parameter(torch.Tensor(
+            n_head, d_model // 2, 3, d_qkv // 2))
+        self.w_o_c = nn.Parameter(torch.Tensor(
+            n_head, d_qkv // 2, d_model // 2))
+        self.w_o_p = nn.Parameter(torch.Tensor(
+            n_head, d_qkv // 2, d_model // 2))
 
         bound = math.sqrt(3.0) * initializer_range
+        self.use_gum = False
         for param in [self.w_qkv_c, self.w_qkv_p, self.w_o_c, self.w_o_p]:
             nn.init.uniform_(param, -bound, bound)
         self.scaling_factor = 1 / d_qkv ** 0.5
@@ -122,15 +130,21 @@ class PartitionedMultiHeadAttention(nn.Module):
             x_c, x_p = torch.chunk(x, 2, dim=-1)
         qkv_c = torch.einsum("btf,hfca->bhtca", x_c, self.w_qkv_c)
         qkv_p = torch.einsum("btf,hfca->bhtca", x_p, self.w_qkv_p)
-        q_c, k_c, v_c = [c.squeeze(dim=3) for c in torch.chunk(qkv_c, 3, dim=3)]
-        q_p, k_p, v_p = [c.squeeze(dim=3) for c in torch.chunk(qkv_p, 3, dim=3)]
+        q_c, k_c, v_c = [c.squeeze(dim=3)
+                         for c in torch.chunk(qkv_c, 3, dim=3)]
+        q_p, k_p, v_p = [c.squeeze(dim=3)
+                         for c in torch.chunk(qkv_p, 3, dim=3)]
         q = torch.cat([q_c, q_p], dim=-1) * self.scaling_factor
         k = torch.cat([k_c, k_p], dim=-1)
         v = torch.cat([v_c, v_p], dim=-1)
         dots = torch.einsum("bhqa,bhka->bhqk", q, k)
         if mask is not None:
             dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
-        probs = F.softmax(dots, dim=-1)
+
+        if self.use_gum:
+            probs = F.gumbel_softmax(dots, hard=True, dim=-1)
+        else:
+            probs = F.softmax(dots, dim=-1)
         probs = self.dropout(probs)
         o = torch.einsum("bhqk,bhka->bhqa", probs, v)
         o_c, o_p = torch.chunk(o, 2, dim=-1)
@@ -171,7 +185,8 @@ class PartitionedTransformerEncoderLayer(nn.Module):
         residual = torch.cat(residual, dim=-1)
         residual = self.residual_dropout_attn(residual)
         x = self.norm_attn(x + residual)
-        residual = self.linear2(self.ff_dropout(self.activation(self.linear1(x))))
+        residual = self.linear2(self.ff_dropout(
+            self.activation(self.linear1(x))))
         residual = torch.cat(residual, dim=-1)
         residual = self.residual_dropout_ff(residual)
         x = self.norm_ff(x + residual)
@@ -179,11 +194,13 @@ class PartitionedTransformerEncoderLayer(nn.Module):
 
 
 class PartitionedTransformerEncoder(nn.Module):
-    def __init__(self, encoder_layer, n_layers):
+    def __init__(self, encoder_layer, n_layers, gum=False):
         super().__init__()
         self.layers = nn.ModuleList(
             [copy.deepcopy(encoder_layer) for i in range(n_layers)]
         )
+        if gum:
+            self.layers[0].self_attn.use_gum = True
 
     def forward(self, x, mask=None):
         for layer in self.layers:
@@ -194,7 +211,8 @@ class PartitionedTransformerEncoder(nn.Module):
 class ConcatPositionalEncoding(nn.Module):
     def __init__(self, d_model=256, max_len=512):
         super().__init__()
-        self.timing_table = nn.Parameter(torch.FloatTensor(max_len, d_model // 2))
+        self.timing_table = nn.Parameter(
+            torch.FloatTensor(max_len, d_model // 2))
         nn.init.normal_(self.timing_table)
         self.norm = nn.LayerNorm(d_model)
 

@@ -2,6 +2,7 @@ import argparse
 import functools
 import itertools
 import os.path
+import os
 import time
 
 import torch
@@ -15,7 +16,7 @@ from benepar import parse_chart
 import evaluate
 import learning_rates
 import treebanks
-from tree_transforms import collapse_unlabel_binarize
+from tree_transforms import collapse_unlabel_binarize, random_parsing_subspan
 
 
 def format_elapsed(start_time):
@@ -31,14 +32,26 @@ def format_elapsed(start_time):
 
 def make_hparams():
     return nkutil.HParams(
+        # Cycle consistency
+        back_cycle=False,
+        back_layers=4,
+        back_loss_constant=1.0,
+        back_use_gold_trees=True,
+        back_loss_type='kl',
         # Discrete gumbel
         discrete_cats=0,
-        two_label=False,
         tau=3.0,
-        anneal_rate=2e-6,
+        anneal_rate=2e-5,
         tau_min=0.05,
         pretrained_divide=1.0,
+        encoder_gum=False,
+        tag_combine_start=np.inf,
+        tag_combine_interval=300,
+        tag_combine_mask_thres=0.05,
+        tag_split_thres=1.001,  # disabled by default
         # Data processing
+        two_label_subspan=False,
+        two_label=False,
         max_len_train=0,  # no length limit
         max_len_dev=0,  # no length limit
         # Optimization
@@ -71,7 +84,7 @@ def make_hparams():
         relu_dropout=0.1,
         residual_dropout=0.2,
         # Output heads and losses
-        force_root_constituent="auto",
+        force_root_constituent="false",  # "auto",
         predict_tags=False,
         d_label_hidden=256,
         d_tag_hidden=256,
@@ -113,14 +126,19 @@ def run_train(args, hparams):
         dev_treebank = dev_treebank.filter_by_length(hparams.max_len_dev)
     print("Loaded {:,} development examples.".format(len(dev_treebank)))
 
+    hparams.tree_transform = None
+
     if hparams.two_label:
+        hparams.tree_transform = collapse_unlabel_binarize
         for treebank in [train_treebank, dev_treebank]:
             for parsing_example in treebank.examples:
-                parsing_example.tree = collapse_unlabel_binarize(
+                parsing_example.tree = hparams.tree_transform(
                     parsing_example.tree)
 
     print("Constructing vocabularies...")
-    label_vocab = decode_chart.ChartDecoder.build_vocab(train_treebank.trees)
+    op_trees = [tree if hparams.tree_transform is None else hparams.tree_transform(
+        tree) for tree in train_treebank.trees]
+    label_vocab = decode_chart.ChartDecoder.build_vocab(op_trees)
     if hparams.use_chars_lstm:
         char_vocab = char_lstm.RetokenizerForCharLSTM.build_vocab(
             train_treebank.sents)
@@ -129,11 +147,20 @@ def run_train(args, hparams):
     print('Label Vocab Size:', len(label_vocab))
 
     tag_vocab = set()
-    for tree in train_treebank.trees:
+    for tree in op_trees:
         for _, tag in tree.pos():
             tag_vocab.add(tag)
     tag_vocab = ["UNK"] + sorted(tag_vocab)
     tag_vocab = {label: i for i, label in enumerate(tag_vocab)}
+
+    del op_trees
+
+    if hparams.two_label_subspan:
+        for parsing_example in dev_treebank:
+            parsing_example.tree = collapse_unlabel_binarize(
+                parsing_example.tree)
+        hparams.tree_transform = collapse_unlabel_binarize
+        hparams.two_label_subspan = random_parsing_subspan
 
     if hparams.force_root_constituent.lower() in ("true", "yes", "1"):
         hparams.force_root_constituent = True
@@ -200,25 +227,41 @@ def run_train(args, hparams):
 
         dev_start_time = time.time()
 
-        dev_predicted = parser.parse(
+        dev_predicted_and_cats = parser.parse(
             dev_treebank.without_gold_annotations(),
             subbatch_max_tokens=args.subbatch_max_tokens,
-            tau=0.0
+            tau=0.0,
+            return_cats=hparams.discrete_cats != 0
         )
+
+        if hparams.discrete_cats == 0:
+            dev_predicted = dev_predicted_and_cats
+            dist = None
+        else:
+            dist = torch.zeros(hparams.discrete_cats)
+            dev_predicted = []
+            for dev_tree, cat in dev_predicted_and_cats:
+                # cat : S x 16
+                dev_predicted.append(dev_tree)
+                dist += cat.sum(dim=0).cpu()
+            dist /= dist.sum()
+
+        # print(dist)
+
         dev_fscore = evaluate.evalb(
             args.evalb_dir, dev_treebank.trees, dev_predicted)
 
-        print(
-            "dev-fscore {} "
-            "best-dev {} "
-            "dev-elapsed {} "
-            "total-elapsed {}".format(
-                dev_fscore,
-                best_dev_fscore,
-                format_elapsed(dev_start_time),
-                format_elapsed(start_time),
-            )
-        )
+        # print(
+        #     "dev-fscore {} "
+        #     "best-dev {} "
+        #     "dev-elapsed {} "
+        #     "total-elapsed {}".format(
+        #         dev_fscore,
+        #         best_dev_fscore,
+        #         format_elapsed(dev_start_time),
+        #         format_elapsed(start_time),
+        #     )
+        # )
 
         if dev_fscore.fscore > best_dev_fscore:
             if best_dev_model_path is not None:
@@ -243,6 +286,9 @@ def run_train(args, hparams):
                 },
                 best_dev_model_path + ".pt",
             )
+        if dist is None:
+            return dist
+        return dist.cpu().numpy()
 
     data_loader = torch.utils.data.DataLoader(
         train_treebank,
@@ -255,7 +301,11 @@ def run_train(args, hparams):
     )
 
     tau = hparams.tau
+    tag_combine_start = hparams.tag_combine_start
     iteration = 0
+
+    # dist = check_dev()
+
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
 
@@ -302,10 +352,41 @@ def run_train(args, hparams):
 
             if current_processed >= check_every:
                 current_processed -= check_every
-                check_dev()
+                dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
 
                 if hparams.discrete_cats > 0:
+                    if iteration > tag_combine_start:
+                        tag_combine_start += hparams.tag_combine_interval
+                        # Masking unused tags
+                        old_mask = parser.mask
+                        new_mask = dist < hparams.tag_combine_mask_thres
+                        new_mask = [new_m or old_m for new_m,
+                                    old_m in zip(new_mask, old_mask)]
+
+                        # print when tag disabled for first time?
+
+                        # spliting overused tags
+                        to_split = (
+                            dist > hparams.tag_split_thres).nonzero()[0]
+                        replaceable = (np.array(new_mask)).nonzero()[0]
+
+                        for original, replace in zip(to_split, replaceable):
+                            new_mask[replace] = False
+                            parser.split_tag(original, replace)
+                            print('copying tag {} into tag {}'.format(
+                                original, replace))
+
+                        print('Dist max', np.max(dist),
+                              '| dist min', np.min(dist))
+                        for b in new_mask:
+                            if b:
+                                print("\n\n\n\n\n Mask Changed!")
+                                print(new_mask)
+                                print("\n\n\n\n\n")
+                                break
+                        parser.set_mask(tuple(new_mask))
+
                     # Gumbel temperature annealing
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
@@ -386,6 +467,7 @@ def run_test(args):
 
 
 def main():
+    os.environ["TOKENIZERS_PARALLELISM"] = "true"
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
 

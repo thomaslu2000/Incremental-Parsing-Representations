@@ -18,6 +18,7 @@ from .partitioned_transformer import (
 from . import parse_base
 from . import retokenization
 from . import subbatching
+from . import tetra_tag
 
 
 class ChartParser(nn.Module, parse_base.BaseParser):
@@ -39,10 +40,28 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.char_vocab = char_vocab
 
         self.d_model = hparams.d_model
-        self.pretrained_divide = hparams.pretrained_divide
+        try:
+            self.tree_transform = hparams.tree_transform
+        except:
+            self.tree_transform = None
+        try:
+            self.pretrained_divide = hparams.pretrained_divide
+        except:
+            self.pretrained_divide = 1.0
+
+        try:
+            self.two_label_subspan = hparams.two_label_subspan
+        except:
+            self.two_label_subspan = None
 
         self.d_cats = hparams.discrete_cats
-        # self.two_label = hparams.two_label
+
+        try:
+            self.mask = hparams.mask
+        except:
+            self.set_mask(tuple(False for _ in range(self.d_cats)))
+
+        self.back_cycle = None
 
         self.char_encoder = None
         self.pretrained_model = None
@@ -71,6 +90,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 if self.d_cats > 0:
                     self.project_in = nn.Linear(
                         d_pretrained, self.d_cats, bias=False)
+
+                    # scaling to adjust output of gpt2
+                    self.project_in.weight.data *= 1e-3
+
                     self.project_out = nn.Linear(
                         self.d_cats, hparams.d_model // 2, bias=False)
                 else:
@@ -98,9 +121,68 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 residual_dropout=hparams.residual_dropout,
                 attention_dropout=hparams.attention_dropout,
             )
+            try:
+                encoder_gum = hparams.encoder_gum
+            except AttributeError:
+                encoder_gum = False
             self.encoder = PartitionedTransformerEncoder(
-                encoder_layer, hparams.num_layers
+                encoder_layer, hparams.num_layers, gum=encoder_gum
             )
+            try:
+                if hparams.back_cycle:
+                    self.back_add_timing = ConcatPositionalEncoding(
+                        d_model=hparams.d_model,
+                        max_len=hparams.encoder_max_len,
+                    )
+                    self.back_use_gold_trees = hparams.back_use_gold_trees
+                    self.back_cycle = PartitionedTransformerEncoder(
+                        encoder_layer, hparams.back_layers, gum=False
+                    )
+                    self.tetra_tag_system = tetra_tag.TetraTagSystem(
+                        tag_vocab=['L/S', 'R/S', 'l', 'r'])
+                    self.tetra_leaves = [2, 3]
+                    self.back_project = nn.Linear(
+                        len(self.tetra_tag_system.tag_vocab) + 1, hparams.d_model // 2, bias=False
+                    )
+                    self.back_loss_constant = hparams.back_loss_constant
+                    if self.d_cats > 0:
+                        seq_dim = self.d_cats
+                    else:
+                        seq_dim = hparams.d_model // 2
+                    self.f_back = nn.Sequential(
+                        # layer norm then linear, no relu
+                        nn.Linear(hparams.d_model, hparams.d_label_hidden),
+                        nn.LayerNorm(hparams.d_label_hidden),
+                        nn.ReLU(),
+                        nn.Linear(hparams.d_label_hidden, seq_dim),
+                    )
+                    if hparams.back_loss_type == 'ce':
+                        from .loss_functions import cel
+                        self.back_criterion = cel
+                    elif hparams.back_loss_type == 'tvd':
+                        from .loss_functions import tvd
+                        self.back_criterion = tvd
+                    elif hparams.back_loss_type == 'kl':
+                        from .loss_functions import kl
+                        self.back_criterion = kl(
+                            reduction='sum')
+                    elif hparams.back_loss_type == 'js':
+                        from .loss_functions import js_gen
+                        self.back_criterion = js_gen(
+                            reduction='sum')
+                    elif hparams.back_loss_type == 'emd':
+                        from .loss_functions import emd
+                        self.back_criterion = emd
+                    elif hparams.back_loss_type == 'mse':
+                        self.back_criterion = nn.MSELoss(reduction='sum')
+                    else:
+                        raise ValueError(
+                            "Invalid type of loss for backwards cycle")
+                    #  measures of simularities between probability distributions (wasserstein, earth movers, section 2 of wasserstein gan paper)
+                    # loss from distribution difference (softmax can end up w inf)
+
+            except:
+                self.back_cycle = None
         else:
             self.morpho_emb_dropout = None
             self.add_timing = None
@@ -135,6 +217,14 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         )
 
         self.parallelized_devices = None
+
+    def set_mask(self, m):
+        assert len(
+            m) == self.d_cats, "Length of given mask does not match number of dimensions"
+        self.mask = tuple(b for b in m)
+
+        # nn param instead of this
+        self.config["hparams"]['mask'] = self.mask
 
     @property
     def device(self):
@@ -181,6 +271,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         return parser
 
     def encode(self, example):
+
+        if self.two_label_subspan is not None and self.two_label_subspan is not False:
+            example = self.two_label_subspan(example, self.tree_transform)
+
         if self.char_encoder is not None:
             encoded = self.retokenizer(example.words, return_tensors="np")
         else:
@@ -195,6 +289,15 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     [-100] + [self.tag_vocab[tag]
                               for _, tag in example.pos()] + [-100]
                 )
+            if self.back_cycle is not None and self.back_use_gold_trees:
+                tags = [len(self.tetra_tag_system.tag_vocab)] + self.tetra_tag_system.ids_from_tree(
+                    example.tree) + [len(self.tetra_tag_system.tag_vocab)]
+                encoded['tetra_tags'] = torch.tensor(tags)
+                mask = [i in self.tetra_leaves for i in tags]
+                mask[0] = mask[-1] = True
+                encoded['tetra_tags_mask'] = torch.tensor(mask)
+                padding_mask = [True for i in tags]
+                encoded['tetra_padding_mask'] = torch.tensor(padding_mask)
         return encoded
 
     def pad_encoded(self, encoded_batch):
@@ -203,7 +306,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 {
                     k: v
                     for k, v in example.items()
-                    if (k != "span_labels" and k != "tag_labels")
+                    if (k not in ["span_labels", "tag_labels", "tetra_tags", "tetra_tags_mask", "tetra_padding_mask"])
                 }
                 for example in encoded_batch
             ],
@@ -218,6 +321,22 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 [example["tag_labels"] for example in encoded_batch],
                 batch_first=True,
                 padding_value=-100,
+            )
+        if encoded_batch and "tetra_tags" in encoded_batch[0]:
+            batch["tetra_tags"] = nn.utils.rnn.pad_sequence(
+                [example["tetra_tags"] for example in encoded_batch],
+                batch_first=True,
+                padding_value=len(self.tetra_tag_system.tag_vocab)
+            )
+        if encoded_batch and "tetra_padding_mask" in encoded_batch[0]:
+            batch["tetra_padding_mask"] = nn.utils.rnn.pad_sequence(
+                [example["tetra_padding_mask"] for example in encoded_batch],
+                batch_first=True
+            )
+        if encoded_batch and "tetra_tags_mask" in encoded_batch[0]:
+            batch["tetra_tags_mask"] = nn.utils.rnn.pad_sequence(
+                [example["tetra_tags_mask"] for example in encoded_batch],
+                batch_first=True
             )
         return batch
 
@@ -241,8 +360,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             res.append((len(ids), subbatch))
         return res
 
-    def forward(self, batch, tau=1.0, force_cats=None):
-        categories = None
+    def forward(self, batch, tau=1.0, return_cat_logits=False, force_cats=None):
+        category_ret = None
         if force_cats is None:
             # Begin calculating from batch
             valid_token_mask = batch["valid_token_mask"].to(self.output_device)
@@ -296,20 +415,32 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 features.masked_fill_(~valid_token_mask[:, :, None], 0)
                 if self.encoder is not None:
                     if self.d_cats > 0:
-                        cats = self.project_in(features)
+                        category_logits = self.project_in(features)
+
+                        mask = torch.BoolTensor(
+                            np.tile(self.mask, (category_logits.shape[0], category_logits.shape[1], 1))).to(self.device)
+                        category_logits = category_logits.masked_fill(
+                            mask, -1e9)
                         if tau > 0:
                             # take the gumbel softmax to
-                            cats = F.gumbel_softmax(cats, tau=tau, hard=True)
+                            # hard = false for training?
+                            cats = F.gumbel_softmax(
+                                category_logits, tau=tau, hard=True)
                         else:
                             # when tau == 0, take the argmax (for deterministic testing)
-                            max_idx = torch.argmax(cats, dim=-1)
+                            max_idx = torch.argmax(category_logits, dim=-1)
                             cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
                                 torch.FloatTensor).to(self.output_device)
-                        categories = cats.argmax(-1).cpu().numpy()
+                        if return_cat_logits:
+                            category_ret = category_logits
+                        else:
+                            category_ret = cats
+
                         extra_content_annotations = self.project_out(cats)
                     else:
                         extra_content_annotations = self.project_pretrained(
                             features)
+                        category_ret = extra_content_annotations
             # end calculating from batch
         else:
             # Begin forcing gumbel categories
@@ -330,7 +461,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 valid_token_mask).to(self.output_device)
             extra_content_annotations = self.project_out(cats)
 
-        # below here?
         if self.encoder is not None:
             if self.d_cats > 0 and tau == 0:
                 # disabling dropout to get deterministic results for analysis
@@ -380,14 +510,40 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             [span_scores.new_zeros(
                 span_scores.shape[:-1] + (1,)), span_scores], -1
         )
-        return span_scores, tag_scores, categories
+        return span_scores, tag_scores, category_ret
+
+    def split_tag(self, original_idx, copy_idx):
+
+        # give this tag the same probability of being chosen as original
+        self.project_in.weight.data[copy_idx] = self.project_in.weight.data[original_idx]
+        # add noise ?
+
+        # give this tag the same features for the end transformer
+        self.project_out.weight.data[:,
+                                     copy_idx] = self.project_out.weight.data[:, original_idx]
 
     def compute_loss(self, batch, tau=1.0):
-        span_scores, tag_scores, categories = self.forward(batch, tau)
+        span_scores, tag_scores, cats = self.forward(
+            batch, tau, return_cat_logits=True)
+
         span_labels = batch["span_labels"].to(span_scores.device)
         span_loss = self.criterion(span_scores, span_labels)
-        # Divide by the total batch size, not by the subbatch size
+
         span_loss = span_loss / batch["batch_size"]
+
+        if self.back_cycle:
+            # print('span loss: ', span_loss.data.cpu().numpy(), end=' | ')
+            if self.back_use_gold_trees:
+                if self.d_cats > 0:
+                    back_loss = self.tetra_to_tags(batch, cats)
+                else:
+                    back_loss = self.tetra_to_annotations(batch, cats)
+            else:
+                back_loss = self.predicted_tetra_to_tags(
+                    batch, cats, span_scores)
+
+            span_loss += back_loss / batch["batch_num_tokens"]
+
         if tag_scores is None:
             return span_loss
         else:
@@ -400,6 +556,106 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             )
             tag_loss = tag_loss / batch["batch_num_tokens"]
             return span_loss + tag_loss
+
+    def tetra_to_tags(self, batch, cats):
+        assert self.back_cycle is not None and self.back_use_gold_trees
+
+        # tree to tags
+        encoder_in = F.one_hot(batch["tetra_tags"].to(self.device), num_classes=len(
+            self.tetra_tag_system.tag_vocab) + 1).float()
+        encoder_in = self.back_project(encoder_in)
+        encoder_in = self.back_add_timing(self.morpho_emb_dropout(encoder_in))
+
+        annotations = self.back_cycle(
+            encoder_in, batch['tetra_padding_mask'].to(self.device))
+
+        logits = self.f_back(annotations)
+        loss = self.back_criterion(
+            logits[batch["tetra_tags_mask"].to(self.device)], cats[batch["valid_token_mask"].to(self.device)]) / 2
+
+        # back prop experiment
+        loss += self.back_criterion(
+            cats[batch["valid_token_mask"].to(self.device)], logits[batch["tetra_tags_mask"].to(self.device)]) / 2
+
+        # is it right for cats to be after the gumbel softmax? use logits v logits
+
+        # for later -- use this as a prior for inference
+        if np.random.random() < 0.001:
+            print('back loss: ', loss.data.cpu().numpy())
+
+        return self.back_loss_constant * loss
+
+    def tetra_to_annotations(self, batch, eca):
+        assert self.back_cycle is not None and self.back_use_gold_trees
+
+        # tree to tags
+        encoder_in = F.one_hot(batch["tetra_tags"].to(self.device), num_classes=len(
+            self.tetra_tag_system.tag_vocab) + 1).float()
+        encoder_in = self.back_project(encoder_in)
+        encoder_in = self.back_add_timing(self.morpho_emb_dropout(encoder_in))
+
+        annotations = self.back_cycle(
+            encoder_in, batch['tetra_padding_mask'].to(self.device))
+        logits = self.f_back(annotations)
+        loss = self.back_criterion(
+            logits[batch["tetra_tags_mask"].to(self.device)], eca[batch["valid_token_mask"].to(self.device)]) / 2
+
+        # back prop experiment
+        loss += self.back_criterion(
+            eca[batch["valid_token_mask"].to(self.device)], logits[batch["tetra_tags_mask"].to(self.device)]) / 2
+
+        # for later -- use this as a prior for inference
+        if np.random.random() < 0.001:
+            print('back loss: ', loss.data.cpu().numpy())
+
+        return self.back_loss_constant * loss
+
+    def predicted_tetra_to_tags(self, batch, cats, span_scores):
+        assert False, 'using gold trees for now'
+        assert self.back_cycle is not None and not self.back_use_gold_trees
+
+        lengths = batch["valid_token_mask"].sum(-1) - 2
+        lengths = lengths.to(span_scores.device)
+        charts_np = self.decoder.charts_from_pytorch_scores_batched(
+            span_scores, lengths
+        )
+        tetra_tags = []
+        tetra_tags_mask = []
+        for i in range(len(lengths)):
+            tree = self.decoder.tree_from_chart(
+                charts_np[i], leaves=[('S', str(i)) for i in range(lengths[i])])
+            tree = self.tree_transform(tree)
+            tets = [len(self.tetra_tag_system.tag_vocab)] + self.tetra_tag_system.ids_from_tree(
+                tree) + [len(self.tetra_tag_system.tag_vocab)]
+            tetra_tags.append(torch.Tensor(tets))
+            mask = [i in self.tetra_leaves for i in tets]
+            mask[0] = mask[-1] = True
+            tetra_tags_mask.append(torch.Tensor(mask).bool())
+
+        tetra_tags = nn.utils.rnn.pad_sequence(
+            tetra_tags,
+            batch_first=True,
+            padding_value=len(self.tetra_tag_system.tag_vocab)
+        ).long()
+
+        tetra_tags_mask = nn.utils.rnn.pad_sequence(
+            tetra_tags_mask,
+            batch_first=True
+        )
+
+        # tree to tags
+        encoder_in = F.one_hot(tetra_tags.to(self.device), num_classes=len(
+            self.tetra_tag_system.tag_vocab) + 1).float()
+        encoder_in = self.back_project(encoder_in)
+        encoder_in = self.add_timing(self.morpho_emb_dropout(encoder_in))
+        annotations = self.back_cycle(encoder_in, None)
+        logits = self.f_back(annotations)
+        loss = self.back_criterion(
+            logits[tetra_tags_mask.to(self.device)], cats[batch["valid_token_mask"].to(self.device)])
+
+        print('back loss: ', loss.data.cpu().numpy())
+
+        return self.back_loss_constant * loss
 
     def _parse_encoded(
         self, examples, encoded, return_compressed=False, return_scores=False, return_cats=False, tau=0.0
@@ -463,7 +719,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves)
 
     def check_force_cats(self, examples):
-        return self.d_cats > 0 and isinstance(examples[0], (list, np.ndarray))
+        return self.d_cats > 0 and (examples is None or isinstance(examples[0], (list, np.ndarray)))
 
     def parse(
         self,
