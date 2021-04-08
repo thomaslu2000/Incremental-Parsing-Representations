@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import AutoModel
+from transformers import AutoModel, AutoConfig
 
 from . import char_lstm
 from . import decode_chart
@@ -55,6 +55,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.two_label_subspan = None
 
         self.d_cats = hparams.discrete_cats
+
+        try:
+            self.tags_per_word = hparams.tags_per_word
+            assert self.d_cats % self.tags_per_word == 0, "tags-per-word must divide d_cats"
+        except:
+            self.tags_per_word = 1
 
         try:
             self.mask = hparams.mask
@@ -138,9 +144,20 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     self.back_cycle = PartitionedTransformerEncoder(
                         encoder_layer, hparams.back_layers, gum=False
                     )
-                    self.tetra_tag_system = tetra_tag.TetraTagSystem(
-                        tag_vocab=['L/S', 'R/S', 'l', 'r'])
-                    self.tetra_leaves = [2, 3]
+                    if hparams.two_label or hparams.two_label_subspan:
+                        self.tetra_tag_system = tetra_tag.TetraTagSystem(
+                            tag_vocab=['L/S', 'R/S', 'l', 'r'])
+                        self.tetra_leaves = [2, 3]
+                    else:
+                        config = AutoConfig.from_pretrained(
+                            'kitaev/tetra-tag-en')
+                        tag_vocab = [config.id2label[i]
+                                     for i in sorted(config.id2label.keys())]
+                        self.tetra_tag_system = tetra_tag.TetraTagSystem(
+                            tag_vocab=tag_vocab)
+                        self.tetra_leaves = [i for i in range(
+                            len(tag_vocab)) if tag_vocab[i][0] in 'lr']
+
                     self.back_project = nn.Linear(
                         len(self.tetra_tag_system.tag_vocab) + 1, hparams.d_model // 2, bias=False
                     )
@@ -421,20 +438,24 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             np.tile(self.mask, (category_logits.shape[0], category_logits.shape[1], 1))).to(self.device)
                         category_logits = category_logits.masked_fill(
                             mask, -1e9)
+                        b, w, d = category_logits.shape
+                        category_logits = category_logits.reshape(
+                            b, w, self.tags_per_word, d // self.tags_per_word)
                         if tau > 0:
-                            # take the gumbel softmax to
-                            # hard = false for training?
                             cats = F.gumbel_softmax(
-                                category_logits, tau=tau, hard=True)
+                                category_logits, dim=-1, tau=tau, hard=True)
                         else:
                             # when tau == 0, take the argmax (for deterministic testing)
                             max_idx = torch.argmax(category_logits, dim=-1)
-                            cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
+                            cats = F.one_hot(max_idx, num_classes=self.d_cats // self.tags_per_word).type(
                                 torch.FloatTensor).to(self.output_device)
+
                         if return_cat_logits:
-                            category_ret = category_logits
+                            category_ret = category_logits.reshape(b, w, d)
                         else:
-                            category_ret = cats
+                            category_ret = cats.reshape(b, w, d)
+
+                        cats = cats.reshape(b, w, d)
 
                         extra_content_annotations = self.project_out(cats)
                     else:
@@ -445,18 +466,15 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         else:
             # Begin forcing gumbel categories
             assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
-            categories = force_cats
-            cats = []
-            valid_token_mask = []
-            for i, sen in enumerate(force_cats):
-                set_i = []
-                for j, cat in enumerate(sen):
-                    onehot = np.zeros(self.d_cats)
-                    onehot[cat] = 1
-                    set_i.append(onehot)
-                cats.append(set_i)
-                valid_token_mask.append([True for _ in sen])
-            cats = torch.Tensor(cats).to(self.output_device)
+            category_ret = force_cats
+            force_cats = torch.LongTensor(force_cats)
+            force_cats = force_cats.reshape(
+                force_cats.shape[0], force_cats.shape[1], self.tags_per_word)
+            cats = F.one_hot(force_cats,
+                             num_classes=self.d_cats // self.tags_per_word).to(self.output_device).float()
+            b, w, tpw, d = cats.shape
+            cats = cats.reshape(b, w, tpw * d)
+            valid_token_mask = np.ones((b, w))
             valid_token_mask = torch.BoolTensor(
                 valid_token_mask).to(self.output_device)
             extra_content_annotations = self.project_out(cats)

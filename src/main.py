@@ -16,7 +16,7 @@ from benepar import parse_chart
 import evaluate
 import learning_rates
 import treebanks
-from tree_transforms import collapse_unlabel_binarize, random_parsing_subspan
+from tree_transforms import collapse_unlabel_binarize, random_parsing_subspan, collapse_binarize
 
 
 def format_elapsed(start_time):
@@ -45,6 +45,7 @@ def make_hparams():
         tau_min=0.05,
         pretrained_divide=1.0,
         encoder_gum=False,
+        tags_per_word=1,
         tag_combine_start=np.inf,
         tag_combine_interval=300,
         tag_combine_mask_thres=0.05,
@@ -52,11 +53,13 @@ def make_hparams():
         # Data processing
         two_label_subspan=False,
         two_label=False,
+        collapse_binarize=False,
         max_len_train=0,  # no length limit
         max_len_dev=0,  # no length limit
         # Optimization
         batch_size=32,
-        learning_rate=0.00005,
+        lr=0.00005,
+        pretrained_lr=0.00005,
         learning_rate_warmup_steps=160,
         clip_grad_norm=0.0,  # no clipping
         checks_per_epoch=4,
@@ -130,6 +133,10 @@ def run_train(args, hparams):
 
     if hparams.two_label:
         hparams.tree_transform = collapse_unlabel_binarize
+    elif hparams.collapse_binarize:
+        hparams.tree_transform = collapse_binarize
+
+    if hparams.tree_transform is not None:
         for treebank in [train_treebank, dev_treebank]:
             for parsing_example in treebank.examples:
                 parsing_example.tree = hparams.tree_transform(
@@ -189,11 +196,20 @@ def run_train(args, hparams):
         print("Not using CUDA!")
 
     print("Initializing optimizer...")
+
+    pretrained_weights = list(
+        params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    other_weights = []
+    for p in parser.parameters():
+        if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
+            other_weights.append(p)
+
     trainable_parameters = [
-        param for param in parser.parameters() if param.requires_grad
+        {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
+        {'params': other_weights}
     ]
     optimizer = torch.optim.Adam(
-        trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9
+        trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
     )
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
@@ -205,7 +221,7 @@ def run_train(args, hparams):
         verbose=True,
     )
 
-    clippable_parameters = trainable_parameters
+    clippable_parameters = pretrained_weights + other_weights
     grad_clip_threshold = (
         np.inf if hparams.clip_grad_norm == 0 else hparams.clip_grad_norm
     )
@@ -246,7 +262,7 @@ def run_train(args, hparams):
                 dist += cat.sum(dim=0).cpu()
             dist /= dist.sum()
 
-        # print(dist)
+        print(dist)
 
         dev_fscore = evaluate.evalb(
             args.evalb_dir, dev_treebank.trees, dev_predicted)
@@ -304,7 +320,7 @@ def run_train(args, hparams):
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
-    # dist = check_dev()
+    dist = check_dev()
 
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
