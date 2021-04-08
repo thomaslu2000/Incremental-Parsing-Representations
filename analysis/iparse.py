@@ -41,6 +41,9 @@ class IParser():
                            _pos=[(w, 'UNK') for w in words])
         ])
         tree, cats = self.parser.parse(treebank, return_cats=True, tau=0)[0]
+        w, d = cats.shape
+        cats = cats.reshape(w, self.parser.tags_per_word,
+                            d // self.parser.tags_per_word)
         cats = cats.argmax(-1).cpu().numpy().tolist()
         self.remove_pos(tree)
         for i in range(len(tree.leaves())):
