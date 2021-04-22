@@ -529,7 +529,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             extra_content_annotations = self.project_out(cats)
 
         if self.encoder is not None:
-            if self.d_cats > 0 and tau == 0:
+            if self.d_cats > 0 and not self.use_vq and tau == 0:
                 # disabling dropout to get deterministic results for analysis
                 # TODO is this step needed?
                 encoder_in = self.add_timing(extra_content_annotations)
