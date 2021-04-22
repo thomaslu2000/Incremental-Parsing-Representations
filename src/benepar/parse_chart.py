@@ -450,6 +450,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         (quantized_features, categories, commit_loss) = self.vq(
                             unquantized_features)
 
+                        if tau > 0.0:
+                            assert self.training, "expected no annealing during eval"
+                            quantized_features = (
+                                (1.0 - tau) * quantized_features
+                                + tau * unquantized_features)
+
                         extra_content_annotations = torch.zeros_like(projected_features)
                         extra_content_annotations[quantization_mask] = quantized_features
 
@@ -459,6 +465,19 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             device=categories.device,
                         )
                         category_ret[quantization_mask] = categories
+
+                        if tau > 0.0:
+                            assert self.training, "expected no annealing during eval"
+                            extra_content_annotations[:, 0] = tau * projected_features[:, 0]
+                            extra_content_annotations[
+                                torch.arange(features.shape[0]),
+                                valid_token_mask.sum(1) - 1,
+                            ] = tau * projected_features[
+                                torch.arange(features.shape[0]),
+                                valid_token_mask.sum(1) - 1,
+                            ]
+
+                            commit_loss = commit_loss * (1.0 - tau)
 
                         commit_loss = commit_loss * unquantized_features.shape[0] * unquantized_features.shape[1]
                     elif self.d_cats > 0:

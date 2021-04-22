@@ -42,6 +42,7 @@ def make_hparams():
         use_vq=False,
         vq_decay=0.85,
         vq_commitment=1.0,
+        vq_warmup_steps=0,
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
@@ -333,6 +334,15 @@ def run_train(args, hparams):
             iteration += 1
             optimizer.zero_grad()
             parser.train()
+
+            if hparams.use_vq and hparams.vq_warmup_steps == 0:
+                tau = 0.0
+            elif hparams.use_vq:
+                step = total_processed // hparams.batch_size
+                if step >= hparams.vq_warmup_steps:
+                    tau = 0.0
+                else:
+                    tau = max(0.0, 1.0 - step / hparams.vq_warmup_steps)
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
