@@ -75,6 +75,7 @@ def make_hparams():
         # BERT and other pre-trained models
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
+        use_forced_lm=False,
         # Partitioned transformer encoder
         use_encoder=False,
         d_model=1024,

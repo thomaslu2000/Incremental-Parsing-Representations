@@ -85,6 +85,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             )
             self.pretrained_model = AutoModel.from_pretrained(
                 hparams.pretrained_model)
+            self.use_forced_lm = hparams.use_forced_lm
             d_pretrained = self.pretrained_model.config.hidden_size
 
             if hparams.use_encoder:
@@ -415,10 +416,17 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     extra_kwargs["decoder_attention_mask"] = batch[
                         "decoder_attention_mask"
                     ].to(self.device)
-
-                pretrained_out = self.pretrained_model(
-                    input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
-                )
+                if self.retokenizer.is_t5 and self.use_forced_lm:
+                    pretrained_out = self.pretrained_model(
+                        input_ids=input_ids[:, :1],
+                        attention_mask=pretrained_attention_mask[:, :1],
+                        return_dict=True,
+                        **extra_kwargs
+                    )
+                else:
+                    pretrained_out = self.pretrained_model(
+                        input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
+                    )
                 features = pretrained_out.last_hidden_state.to(
                     self.output_device) / self.pretrained_divide
                 features = features[
