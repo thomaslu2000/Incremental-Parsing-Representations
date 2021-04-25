@@ -517,6 +517,34 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             features)
                         category_ret = extra_content_annotations
             # end calculating from batch
+        elif self.use_vq:
+            # Begin forcing vq categories
+            assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
+            batch_size = len(force_cats)
+            max_len = max([len(x) for x in force_cats]) + 2  # +2 for start/stop
+
+            valid_token_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
+            quantization_mask = valid_token_mask.clone()
+            categories = []
+
+            for i, sent_categories in enumerate(force_cats):
+                categories.extend(sent_categories)
+                valid_token_mask[i, :len(sent_categories)+2] = True
+                quantization_mask[i, 1:len(sent_categories)+1] = True
+            
+            categories = torch.tensor(
+                categories, dtype=torch.long, device=self.output_device)
+            valid_token_mask = valid_token_mask.to(self.output_device)
+            quantization_mask = quantization_mask.to(self.output_device)
+
+            quantized_features = F.embedding(
+                categories, self.vq.embed.transpose(0, 1))
+
+            extra_content_annotations = torch.zeros(
+                (batch_size, max_len, quantized_features.shape[-1]),
+                dtype=quantized_features.dtype, device=quantized_features.device
+            )
+            extra_content_annotations[quantization_mask] = quantized_features
         else:
             # Begin forcing gumbel categories
             assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
@@ -748,7 +776,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             if self.check_force_cats(examples):
                 span_scores, tag_scores, categories, _ = self.forward(
                     batch=None, force_cats=examples)
-                lengths = np.array([len(example) - 2 for example in examples])
+                if self.use_vq:
+                    lengths = np.array([len(example) for example in examples])
+                else:
+                    lengths = np.array([len(example) - 2 for example in examples])
             else:
                 batch = self.pad_encoded(encoded)
                 span_scores, tag_scores, categories, _ = self.forward(batch, tau)
@@ -769,8 +800,13 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         if self.check_force_cats(examples):
             for i in range(len(examples)):
-                yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
+                if self.use_vq:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i]])
+                else:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
             return
+        
+        categories_np = categories.cpu().numpy()
 
         for i in range(len(encoded)):
             example_len = len(examples[i].words)
@@ -797,7 +833,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             predicted_tags, examples[i].pos()
                         )
                     ]
-                if return_cats:
+                if return_cats and self.use_vq:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories_np[i,1:example_len+1]
+                elif return_cats:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories[i]
                 else:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves)

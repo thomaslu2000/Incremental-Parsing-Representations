@@ -6,6 +6,7 @@ import os
 import time
 
 import torch
+import torch.nn.functional as F
 
 import numpy as np
 
@@ -263,8 +264,9 @@ def run_train(args, hparams):
             dist = torch.zeros(hparams.discrete_cats)
             dev_predicted = []
             for dev_tree, cat in dev_predicted_and_cats:
-                # cat : S x 16
                 dev_predicted.append(dev_tree)
+                if len(cat.shape) == 1:
+                    cat = F.one_hot(torch.tensor(cat), hparams.discrete_cats)
                 dist += cat.sum(dim=0).cpu()
             dist /= dist.sum()
 
