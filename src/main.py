@@ -333,6 +333,7 @@ def run_train(args, hparams):
         for batch_num, batch in enumerate(data_loader, start=1):
             iteration += 1
             optimizer.zero_grad()
+            parser.commit_loss_accum = 0.0
             parser.train()
 
             if hparams.use_vq and hparams.vq_warmup_steps == 0:
@@ -361,24 +362,26 @@ def run_train(args, hparams):
 
             optimizer.step()
 
-            # print(
-            #     "epoch {:,} "
-            #     "batch {:,}/{:,} "
-            #     "processed {:,} "
-            #     "batch-loss {:.4f} "
-            #     "grad-norm {:.4f} "
-            #     "epoch-elapsed {} "
-            #     "total-elapsed {}".format(
-            #         epoch,
-            #         batch_num,
-            #         int(np.ceil(len(train_treebank) / hparams.batch_size)),
-            #         total_processed,
-            #         batch_loss_value,
-            #         grad_norm,
-            #         format_elapsed(epoch_start_time),
-            #         format_elapsed(start_time),
-            #     )
-            # )
+            print(
+                "epoch {:,} "
+                "batch {:,}/{:,} "
+                "processed {:,} "
+                "batch-loss {:.4f} "
+                "grad-norm {:.4f} "
+                "commit-loss {:.4f} "
+                "epoch-elapsed {} "
+                "total-elapsed {}".format(
+                    epoch,
+                    batch_num,
+                    int(np.ceil(len(train_treebank) / hparams.batch_size)),
+                    total_processed,
+                    batch_loss_value,
+                    grad_norm,
+                    float(parser.commit_loss_accum),
+                    format_elapsed(epoch_start_time),
+                    format_elapsed(start_time),
+                )
+            )
 
             if current_processed >= check_every:
                 current_processed -= check_every

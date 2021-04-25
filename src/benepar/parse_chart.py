@@ -99,6 +99,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         decay=hparams.vq_decay,
                         commitment=hparams.vq_commitment,
                     )
+                    self.commit_loss_accum = 0.0
                 elif self.d_cats > 0:
                     self.project_in = nn.Linear(
                         d_pretrained, self.d_cats, bias=False)
@@ -615,6 +616,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     batch, cats, span_scores)
 
             span_loss += back_loss / batch["batch_num_tokens"]
+
+        if self.use_vq:
+            self.commit_loss_accum += float(commit_loss.cpu())
 
         if tag_scores is None:
             return span_loss + commit_loss
