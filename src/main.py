@@ -327,6 +327,13 @@ def run_train(args, hparams):
     tau = hparams.tau
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
+    split_cats_iterations = [
+        1245, 1245+312, 1245+623, 1245+934,
+        2*1245, 2*1245+312, 2*1245+623, 2*1245+934,
+        3*1245, 3*1245+312, 3*1245+623, 3*1245+934,
+        4*1245, 4*1245+312, 4*1245+623, 4*1245+934,
+        5*1245, 5*1245+312, 5*1245+623, 5*1245+934,
+        ]
 
     # dist = check_dev()
 
@@ -390,6 +397,38 @@ def run_train(args, hparams):
                 current_processed -= check_every
                 dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
+
+                if (hparams.discrete_cats > 0
+                        and hparams.use_vq
+                        and split_cats_iterations
+                        and iteration >= split_cats_iterations[0]
+                        ):
+                    split_cats_iterations.pop(0)
+                    ptdist = parser.vq.cluster_size.cpu().numpy()
+                    ptdist = ptdist / np.sum(ptdist)
+                    print("dist:", dist)
+                    print("pt-dist:", ptdist)
+                    # do_replace = ptdist < 1e-24
+                    do_replace = ptdist < 1e-20  # starting with split4
+                    print("Number of categories replaced:", np.sum(do_replace))
+                    random_replacements = np.random.choice(
+                        np.arange(ptdist.shape[0]),
+                        size=ptdist.shape,
+                        replace=True,
+                        p=ptdist)
+                    replacement_mapping = np.arange(ptdist.shape[0], dtype=int)
+                    replacement_mapping = np.where(
+                        do_replace,
+                        random_replacements,
+                        np.arange(ptdist.shape[0])
+                    )
+                    replacement_mapping = torch.tensor(
+                        replacement_mapping, dtype=torch.long,
+                        device=parser.vq.embed.device)
+                    parser.vq.embed = parser.vq.embed[:, replacement_mapping]
+                    parser.vq.cluster_size = parser.vq.cluster_size[replacement_mapping]
+                    parser.vq.embed_avg = parser.vq.embed_avg[:, replacement_mapping]
+                    print("Done replacing.")
 
                 if hparams.discrete_cats > 0 and not hparams.use_vq:
                     if iteration > tag_combine_start:
