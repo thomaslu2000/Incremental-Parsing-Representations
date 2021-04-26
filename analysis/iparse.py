@@ -2,20 +2,23 @@ import sys
 sys.path.append("../src")
 import torch
 import torch.nn.functional as F
-from benepar import decode_chart
-from benepar import nkutil
-from benepar import parse_chart
-from tree_transforms import collapse_unlabel_binarize, collapse_binarize
+import evaluate
+from benepar2 import decode_chart
+from benepar2 import nkutil
+from benepar2 import parse_chart
+from tree_transforms import collapse_unlabel_binarize
+import treebanks
 from treebanks import ParsingExample, Treebank
 import numpy as np
 from nltk.tree import Tree
-from benepar import tetra_tag
+from benepar2 import tetra_tag
 
 
 class IParser():
     def __init__(self, model_path_base):
         #         self.info = torch.load(model_path_base, map_location=lambda storage, location: storage)
         self.parser = parse_chart.ChartParser.from_trained(model_path_base)
+        self.tag_vocab = self.parser.tag_vocab
 
     def remove_pos(self, tree):
         """
@@ -77,3 +80,30 @@ class IParser():
 
         logits = self.parser.f_back(annotations)
         return logits[0][mask].argmax(-1).numpy()
+
+    def load_dev(self, path='../data/22.auto.clean', max_len_dev=40):
+        dev_treebank = treebanks.load_trees(
+            path, None, 'default'
+        )
+        dev_treebank = dev_treebank.filter_by_length(max_len_dev)
+        return dev_treebank
+
+    def get_tag_dist(self, dev_treebank):
+        dev_predicted_and_cats, encoded = self.parser.parse(
+            dev_treebank.without_gold_annotations(),
+            subbatch_max_tokens=2000,
+            tau=0.0,
+            return_cats=True,
+            return_encoded=True
+        )
+        tag_distribution = np.zeros(
+            (len(self.tag_vocab), self.parser.d_cats))
+        for (dev_tree, cat), example, encode in zip(dev_predicted_and_cats, dev_treebank, encoded):
+            categories = cat.argmax(-1).cpu().numpy()
+            try:
+                for i, pos in enumerate(example.pos()):
+                    tag_distribution[self.tag_vocab[pos[1]],
+                                     categories[encode['words_from_tokens'][i + 1]]] += 1
+            except:
+                pass
+        return tag_distribution

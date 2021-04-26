@@ -16,7 +16,7 @@ from benepar import parse_chart
 import evaluate
 import learning_rates
 import treebanks
-from tree_transforms import collapse_unlabel_binarize, random_parsing_subspan, collapse_binarize
+from tree_transforms import collapse_unlabel_binarize, random_parsing_subspan
 
 
 def format_elapsed(start_time):
@@ -42,9 +42,12 @@ def make_hparams():
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
+        en_tau=3.0,
+        en_anneal_rate=2e-5,
         tau_min=0.05,
         pretrained_divide=1.0,
         encoder_gum=False,
+        tag_dist='',
         tags_per_word=1,
         tag_combine_start=np.inf,
         tag_combine_interval=300,
@@ -53,7 +56,6 @@ def make_hparams():
         # Data processing
         two_label_subspan=False,
         two_label=False,
-        collapse_binarize=False,
         max_len_train=0,  # no length limit
         max_len_dev=0,  # no length limit
         # Optimization
@@ -74,6 +76,9 @@ def make_hparams():
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
         # Partitioned transformer encoder
+        uni=False,
+        all_layers_uni=False,
+        first_heads=-1,
         use_encoder=False,
         d_model=1024,
         num_layers=8,
@@ -114,6 +119,7 @@ def run_train(args, hparams):
     print("Hyperparameters:")
     hparams.print()
     print("Loading training trees from {}...".format(args.train_path))
+    print(args.train_path, args.train_path_text, args.text_processing)
     train_treebank = treebanks.load_trees(
         args.train_path, args.train_path_text, args.text_processing
     )
@@ -133,8 +139,6 @@ def run_train(args, hparams):
 
     if hparams.two_label:
         hparams.tree_transform = collapse_unlabel_binarize
-    elif hparams.collapse_binarize:
-        hparams.tree_transform = collapse_binarize
 
     if hparams.tree_transform is not None:
         for treebank in [train_treebank, dev_treebank]:
@@ -247,20 +251,41 @@ def run_train(args, hparams):
             dev_treebank.without_gold_annotations(),
             subbatch_max_tokens=args.subbatch_max_tokens,
             tau=0.0,
-            return_cats=hparams.discrete_cats != 0
+            en_tau=0.0,
+            return_cats=hparams.discrete_cats != 0,
+            return_encoded=hparams.tag_dist
         )
+        if hparams.tag_dist:
+            dev_predicted_and_cats, encoded = dev_predicted_and_cats
 
         if hparams.discrete_cats == 0:
             dev_predicted = dev_predicted_and_cats
             dist = None
         else:
-            dist = torch.zeros(hparams.discrete_cats)
-            dev_predicted = []
-            for dev_tree, cat in dev_predicted_and_cats:
-                # cat : S x 16
-                dev_predicted.append(dev_tree)
-                dist += cat.sum(dim=0).cpu()
-            dist /= dist.sum()
+            if hparams.tag_dist:
+                tag_distribution = np.zeros(
+                    (len(tag_vocab), hparams.discrete_cats))
+                dist = torch.zeros(hparams.discrete_cats)
+                dev_predicted = []
+                for (dev_tree, cat), example, encode in zip(dev_predicted_and_cats, dev_treebank, encoded):
+                    categories = cat.argmax(-1).cpu().numpy()
+                    try:
+                        for i, pos in enumerate(example.pos()):
+                            tag_distribution[tag_vocab[pos[1]],
+                                             categories[encode['words_from_tokens'][i + 1]]] += 1
+                    except:
+                        pass
+                    dev_predicted.append(dev_tree)
+                    dist += cat.sum(dim=0).cpu()
+                dist /= dist.sum()
+                print(hparams.tag_dist)
+            else:
+                dist = torch.zeros(hparams.discrete_cats)
+                dev_predicted = []
+                for dev_tree, cat in dev_predicted_and_cats:
+                    dev_predicted.append(dev_tree)
+                    dist += cat.sum(dim=0).cpu()
+                dist /= dist.sum()
 
         print(dist)
 
@@ -280,6 +305,11 @@ def run_train(args, hparams):
         )
 
         if dev_fscore.fscore > best_dev_fscore:
+
+            if hparams.tag_dist:
+                with open(hparams.tag_dist, 'wb') as f:
+                    np.save(f, tag_distribution)
+
             if best_dev_model_path is not None:
                 extensions = [".pt"]
                 for ext in extensions:
@@ -317,10 +347,11 @@ def run_train(args, hparams):
     )
 
     tau = hparams.tau
+    en_tau = hparams.tau
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
-    dist = check_dev()
+    # dist = check_dev()
 
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
@@ -332,7 +363,7 @@ def run_train(args, hparams):
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
-                loss = parser.compute_loss(subbatch, tau=tau)
+                loss = parser.compute_loss(subbatch, tau=tau, en_tau=en_tau)
                 loss_value = float(loss.data.cpu().numpy())
                 batch_loss_value += loss_value
                 if loss_value > 0:
@@ -406,7 +437,10 @@ def run_train(args, hparams):
                     # Gumbel temperature annealing
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
-                    print('setting temperature to: {:.4f}'.format(tau))
+                    en_tau = np.maximum(
+                        hparams.entau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
+                    print('setting temperature to: {:.4f}, hard attention tau to {:.3f}'.format(
+                        tau, en_tau))
             else:
                 scheduler.step()
 
