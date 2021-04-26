@@ -39,6 +39,10 @@ def make_hparams():
         back_use_gold_trees=True,
         back_loss_type='kl',
         # Discrete gumbel
+        use_vq=False,
+        vq_decay=0.85,
+        vq_commitment=1.0,
+        vq_warmup_steps=0,
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
@@ -60,6 +64,7 @@ def make_hparams():
         max_len_dev=0,  # no length limit
         # Optimization
         batch_size=32,
+        novel_learning_rate=0.,  # don't use separate learning rate
         lr=0.00005,
         pretrained_lr=0.00005,
         learning_rate_warmup_steps=160,
@@ -212,9 +217,26 @@ def run_train(args, hparams):
         {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
         {'params': other_weights}
     ]
-    optimizer = torch.optim.Adam(
-        trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
-    )
+    
+    if hparams.novel_learning_rate == 0.0:
+        optimizer = torch.optim.Adam(
+            trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
+        )
+    else:
+        pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
+        novel_params = set(trainable_parameters) - pretrained_params
+        grouped_trainable_parameters = [
+        {
+            'params': list(pretrained_params),
+            'lr': hparams.learning_rate,
+            },
+            {
+            'params': list(novel_params),
+            'lr': hparams.novel_learning_rate,
+            },
+        ]
+        optimizer = torch.optim.Adam(
+            grouped_trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
         optimizer,
@@ -361,6 +383,15 @@ def run_train(args, hparams):
             optimizer.zero_grad()
             parser.train()
 
+            if hparams.use_vq and hparams.vq_warmup_steps == 0:
+                tau = 0.0
+            elif hparams.use_vq:
+                step = total_processed // hparams.batch_size
+                if step >= hparams.vq_warmup_steps:
+                    tau = 0.0
+                else:
+                    tau = max(0.0, 1.0 - step / hparams.vq_warmup_steps)
+
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
                 loss = parser.compute_loss(subbatch, tau=tau, en_tau=en_tau)
@@ -402,7 +433,7 @@ def run_train(args, hparams):
                 dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
 
-                if hparams.discrete_cats > 0:
+                if hparams.discrete_cats > 0 and not hparams.use_vq:
                     if iteration > tag_combine_start:
                         tag_combine_start += hparams.tag_combine_interval
                         # Masking unused tags
