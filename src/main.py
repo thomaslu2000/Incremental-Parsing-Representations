@@ -46,9 +46,13 @@ def make_hparams():
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
+        en_tau=3.0,
+        en_anneal_rate=2e-5,
         tau_min=0.05,
         pretrained_divide=1.0,
         encoder_gum=False,
+        tag_dist='',
+        tags_per_word=1,
         tag_combine_start=np.inf,
         tag_combine_interval=300,
         tag_combine_mask_thres=0.05,
@@ -60,8 +64,9 @@ def make_hparams():
         max_len_dev=0,  # no length limit
         # Optimization
         batch_size=32,
-        learning_rate=0.00005,
         novel_learning_rate=0.,  # don't use separate learning rate
+        lr=0.00005,
+        pretrained_lr=0.00005,
         learning_rate_warmup_steps=160,
         clip_grad_norm=0.0,  # no clipping
         checks_per_epoch=4,
@@ -76,6 +81,9 @@ def make_hparams():
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
         # Partitioned transformer encoder
+        uni=False,
+        all_layers_uni=False,
+        first_heads=-1,
         use_encoder=False,
         d_model=1024,
         num_layers=8,
@@ -116,6 +124,7 @@ def run_train(args, hparams):
     print("Hyperparameters:")
     hparams.print()
     print("Loading training trees from {}...".format(args.train_path))
+    print(args.train_path, args.train_path_text, args.text_processing)
     train_treebank = treebanks.load_trees(
         args.train_path, args.train_path_text, args.text_processing
     )
@@ -135,6 +144,8 @@ def run_train(args, hparams):
 
     if hparams.two_label:
         hparams.tree_transform = collapse_unlabel_binarize
+
+    if hparams.tree_transform is not None:
         for treebank in [train_treebank, dev_treebank]:
             for parsing_example in treebank.examples:
                 parsing_example.tree = hparams.tree_transform(
@@ -194,12 +205,22 @@ def run_train(args, hparams):
         print("Not using CUDA!")
 
     print("Initializing optimizer...")
+
+    pretrained_weights = list(
+        params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    other_weights = []
+    for p in parser.parameters():
+        if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
+            other_weights.append(p)
+
     trainable_parameters = [
-        param for param in parser.parameters() if param.requires_grad
+        {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
+        {'params': other_weights}
     ]
+    
     if hparams.novel_learning_rate == 0.0:
         optimizer = torch.optim.Adam(
-            trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9
+            trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
         )
     else:
         pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
@@ -215,7 +236,7 @@ def run_train(args, hparams):
             },
         ]
         optimizer = torch.optim.Adam(
-            grouped_trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9)
+            grouped_trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
         optimizer,
@@ -226,7 +247,7 @@ def run_train(args, hparams):
         verbose=True,
     )
 
-    clippable_parameters = trainable_parameters
+    clippable_parameters = pretrained_weights + other_weights
     grad_clip_threshold = (
         np.inf if hparams.clip_grad_norm == 0 else hparams.clip_grad_norm
     )
@@ -252,22 +273,43 @@ def run_train(args, hparams):
             dev_treebank.without_gold_annotations(),
             subbatch_max_tokens=args.subbatch_max_tokens,
             tau=0.0,
-            return_cats=hparams.discrete_cats != 0
+            en_tau=0.0,
+            return_cats=hparams.discrete_cats != 0,
+            return_encoded=hparams.tag_dist
         )
+        if hparams.tag_dist:
+            dev_predicted_and_cats, encoded = dev_predicted_and_cats
 
         if hparams.discrete_cats == 0:
             dev_predicted = dev_predicted_and_cats
             dist = None
         else:
-            dist = torch.zeros(hparams.discrete_cats)
-            dev_predicted = []
-            for dev_tree, cat in dev_predicted_and_cats:
-                # cat : S x 16
-                dev_predicted.append(dev_tree)
-                dist += cat.sum(dim=0).cpu()
-            dist /= dist.sum()
+            if hparams.tag_dist:
+                tag_distribution = np.zeros(
+                    (len(tag_vocab), hparams.discrete_cats))
+                dist = torch.zeros(hparams.discrete_cats)
+                dev_predicted = []
+                for (dev_tree, cat), example, encode in zip(dev_predicted_and_cats, dev_treebank, encoded):
+                    categories = cat.argmax(-1).cpu().numpy()
+                    try:
+                        for i, pos in enumerate(example.pos()):
+                            tag_distribution[tag_vocab[pos[1]],
+                                             categories[encode['words_from_tokens'][i + 1]]] += 1
+                    except:
+                        pass
+                    dev_predicted.append(dev_tree)
+                    dist += cat.sum(dim=0).cpu()
+                dist /= dist.sum()
+                print(hparams.tag_dist)
+            else:
+                dist = torch.zeros(hparams.discrete_cats)
+                dev_predicted = []
+                for dev_tree, cat in dev_predicted_and_cats:
+                    dev_predicted.append(dev_tree)
+                    dist += cat.sum(dim=0).cpu()
+                dist /= dist.sum()
 
-        # print(dist)
+        print(dist)
 
         dev_fscore = evaluate.evalb(
             args.evalb_dir, dev_treebank.trees, dev_predicted)
@@ -285,6 +327,11 @@ def run_train(args, hparams):
         )
 
         if dev_fscore.fscore > best_dev_fscore:
+
+            if hparams.tag_dist:
+                with open(hparams.tag_dist, 'wb') as f:
+                    np.save(f, tag_distribution)
+
             if best_dev_model_path is not None:
                 extensions = [".pt"]
                 for ext in extensions:
@@ -322,6 +369,7 @@ def run_train(args, hparams):
     )
 
     tau = hparams.tau
+    en_tau = hparams.tau
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
@@ -346,7 +394,7 @@ def run_train(args, hparams):
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
-                loss = parser.compute_loss(subbatch, tau=tau)
+                loss = parser.compute_loss(subbatch, tau=tau, en_tau=en_tau)
                 loss_value = float(loss.data.cpu().numpy())
                 batch_loss_value += loss_value
                 if loss_value > 0:
@@ -420,7 +468,10 @@ def run_train(args, hparams):
                     # Gumbel temperature annealing
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
-                    print('setting temperature to: {:.4f}'.format(tau))
+                    en_tau = np.maximum(
+                        hparams.entau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
+                    print('setting temperature to: {:.4f}, hard attention tau to {:.3f}'.format(
+                        tau, en_tau))
             else:
                 scheduler.step()
 

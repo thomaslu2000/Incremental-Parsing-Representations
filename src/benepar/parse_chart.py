@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import AutoModel
+from transformers import AutoModel, AutoConfig
 
 from . import char_lstm
 from . import decode_chart
@@ -53,9 +53,23 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.two_label_subspan = hparams.two_label_subspan
         except:
             self.two_label_subspan = None
+        try:
+            self.uni = hparams.uni
+        except:
+            self.uni = False
+        try:
+            self.all_layers_uni = hparams.all_layers_uni
+        except:
+            self.all_layers_uni = False
 
         self.d_cats = hparams.discrete_cats
         self.use_vq = hparams.use_vq
+
+        try:
+            self.tags_per_word = hparams.tags_per_word
+            assert self.d_cats % self.tags_per_word == 0, "tags-per-word must divide d_cats"
+        except:
+            self.tags_per_word = 1
 
         try:
             self.mask = hparams.mask
@@ -133,12 +147,32 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 residual_dropout=hparams.residual_dropout,
                 attention_dropout=hparams.attention_dropout,
             )
+            first_layer = None
             try:
-                encoder_gum = hparams.encoder_gum
-            except AttributeError:
-                encoder_gum = False
+                if hparams.first_heads > 0:
+                    first_layer = PartitionedTransformerEncoderLayer(
+                        hparams.d_model,
+                        n_head=hparams.first_heads,
+                        d_qkv=hparams.d_kv,
+                        d_ff=hparams.d_ff,
+                        ff_dropout=hparams.relu_dropout,
+                        residual_dropout=hparams.residual_dropout,
+                        attention_dropout=hparams.attention_dropout,
+                    )
+            except:
+                hparams.first_heads = -1
+            self.encoder_gum = hparams.encoder_gum
+            if self.encoder_gum:
+                self.project_pretrained = nn.Linear(
+                    d_pretrained, hparams.d_model // 2, bias=False
+                )
+                num_heads = hparams.first_heads if hparams.first_heads > 0 else hparams.num_heads
+                self.w_qkv_c = nn.Parameter(torch.Tensor(
+                    num_heads, self.d_model // 2, hparams.d_kv // 2))
+                self.w_qkv_p = nn.Parameter(torch.Tensor(
+                    num_heads, self.d_model // 2, hparams.d_kv // 2))
             self.encoder = PartitionedTransformerEncoder(
-                encoder_layer, hparams.num_layers, gum=encoder_gum
+                encoder_layer, hparams.num_layers, first_layer
             )
             try:
                 if hparams.back_cycle:
@@ -148,11 +182,22 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     )
                     self.back_use_gold_trees = hparams.back_use_gold_trees
                     self.back_cycle = PartitionedTransformerEncoder(
-                        encoder_layer, hparams.back_layers, gum=False
+                        encoder_layer, hparams.back_layers
                     )
-                    self.tetra_tag_system = tetra_tag.TetraTagSystem(
-                        tag_vocab=['L/S', 'R/S', 'l', 'r'])
-                    self.tetra_leaves = [2, 3]
+                    if hparams.two_label or hparams.two_label_subspan:
+                        self.tetra_tag_system = tetra_tag.TetraTagSystem(
+                            tag_vocab=['L/S', 'R/S', 'l', 'r'])
+                        self.tetra_leaves = [2, 3]
+                    else:
+                        config = AutoConfig.from_pretrained(
+                            'kitaev/tetra-tag-en')
+                        tag_vocab = [config.id2label[i]
+                                     for i in sorted(config.id2label.keys())]
+                        self.tetra_tag_system = tetra_tag.TetraTagSystem(
+                            tag_vocab=tag_vocab)
+                        self.tetra_leaves = [i for i in range(
+                            len(tag_vocab)) if tag_vocab[i][0] in 'lr']
+
                     self.back_project = nn.Linear(
                         len(self.tetra_tag_system.tag_vocab) + 1, hparams.d_model // 2, bias=False
                     )
@@ -372,7 +417,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             res.append((len(ids), subbatch))
         return res
 
-    def forward(self, batch, tau=1.0, return_cat_logits=False, force_cats=None):
+    def forward(self, batch, tau=1.0, en_tau=0.0, return_cat_logits=False, force_cats=None):
         category_ret = None
         commit_loss = None
         if force_cats is None:
@@ -487,20 +532,24 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             np.tile(self.mask, (category_logits.shape[0], category_logits.shape[1], 1))).to(self.device)
                         category_logits = category_logits.masked_fill(
                             mask, -1e9)
+                        b, w, d = category_logits.shape
+                        category_logits = category_logits.reshape(
+                            b, w, self.tags_per_word, d // self.tags_per_word)
                         if tau > 0:
-                            # take the gumbel softmax to
-                            # hard = false for training?
                             cats = F.gumbel_softmax(
-                                category_logits, tau=tau, hard=True)
+                                category_logits, dim=-1, tau=tau, hard=True)
                         else:
                             # when tau == 0, take the argmax (for deterministic testing)
                             max_idx = torch.argmax(category_logits, dim=-1)
-                            cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
+                            cats = F.one_hot(max_idx, num_classes=self.d_cats // self.tags_per_word).type(
                                 torch.FloatTensor).to(self.output_device)
+
                         if return_cat_logits:
-                            category_ret = category_logits
+                            category_ret = category_logits.reshape(b, w, d)
                         else:
-                            category_ret = cats
+                            category_ret = cats.reshape(b, w, d)
+
+                        cats = cats.reshape(b, w, d)
 
                         extra_content_annotations = self.project_out(cats)
                     else:
@@ -512,24 +561,35 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             # Begin forcing gumbel categories
             assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
             assert not self.use_vq, "Not implemented with vector quantization"
-            categories = force_cats
-            cats = []
-            valid_token_mask = []
-            for i, sen in enumerate(force_cats):
-                set_i = []
-                for j, cat in enumerate(sen):
-                    onehot = np.zeros(self.d_cats)
-                    onehot[cat] = 1
-                    set_i.append(onehot)
-                cats.append(set_i)
-                valid_token_mask.append([True for _ in sen])
-            cats = torch.Tensor(cats).to(self.output_device)
+            category_ret = force_cats
+            force_cats = torch.LongTensor(force_cats)
+            force_cats = force_cats.reshape(
+                force_cats.shape[0], force_cats.shape[1], self.tags_per_word)
+            cats = F.one_hot(force_cats,
+                             num_classes=self.d_cats // self.tags_per_word).to(self.output_device).float()
+            b, w, tpw, d = cats.shape
+            cats = cats.reshape(b, w, tpw * d)
+            valid_token_mask = np.ones((b, w))
+            
             valid_token_mask = torch.BoolTensor(
                 valid_token_mask).to(self.output_device)
             extra_content_annotations = self.project_out(cats)
 
         if self.encoder is not None:
-            if self.d_cats > 0 and not self.use_vq and tau == 0:
+            uni_mask = None
+            if self.all_layers_uni or self.uni:
+                # converting to backwards masks
+                b, t = valid_token_mask.shape
+                uni_mask = torch.tril(
+                    valid_token_mask.repeat(1, t).reshape(b, t, t))
+                if self.all_layers_uni:
+                    valid_token_mask, uni_mask = uni_mask, None
+
+                # only need incremental mask in first layer FIX!
+
+                # set mask to b x t x t
+
+            if self.d_cats > 0  and not self.use_vq and tau == 0:
                 # disabling dropout to get deterministic results for analysis
                 # TODO is this step needed?
                 encoder_in = self.add_timing(extra_content_annotations)
@@ -537,8 +597,24 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 encoder_in = self.add_timing(
                     self.morpho_emb_dropout(extra_content_annotations)
                 )
+            if self.encoder_gum:
+                assert self.d_cats > 0
+                pretrained_encoder_data = self.add_timing(
+                    self.morpho_emb_dropout(self.project_pretrained(features)))
+                v_c, v_p = torch.chunk(encoder_in, 2, dim=-1)
+                v_c = torch.einsum("btf,hfa->bhta", v_c, self.w_qkv_c)
+                v_p = torch.einsum("btf,hfa->bhta", v_p, self.w_qkv_p)
 
-            annotations = self.encoder(encoder_in, valid_token_mask)
+                v_cp = torch.cat([v_c, v_p], dim=-1)
+                annotations = self.encoder(
+                    pretrained_encoder_data, valid_token_mask,
+                    att_v=v_cp, in_x=encoder_in, first_layer_mask=uni_mask, tau=tau)
+                del v_c
+                del v_p
+                del v_cp
+            else:
+                annotations = self.encoder(
+                    encoder_in, valid_token_mask, first_layer_mask=uni_mask, tau=tau)
             # Rearrange the annotations to ensure that the transition to
             # fenceposts captures an even split between position and content.
             # TODO(nikita): try alternatives, such as omitting position entirely
@@ -589,7 +665,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.project_out.weight.data[:,
                                      copy_idx] = self.project_out.weight.data[:, original_idx]
 
-    def compute_loss(self, batch, tau=1.0):
+
+    def compute_loss(self, batch, tau=1.0, en_tau=1.0):
         span_scores, tag_scores, cats, commit_loss = self.forward(
             batch, tau, return_cat_logits=True)
 
@@ -730,7 +807,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         return self.back_loss_constant * loss
 
     def _parse_encoded(
-        self, examples, encoded, return_compressed=False, return_scores=False, return_cats=False, tau=0.0
+        self, examples, encoded, return_compressed=False, return_scores=False, return_cats=False, tau=0.0, en_tau=0.0
     ):
         with torch.no_grad():
             if self.check_force_cats(examples):
@@ -800,7 +877,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         return_scores=False,
         subbatch_max_tokens=None,
         return_cats=False,
-        tau=0.0
+        tau=0.0,
+        en_tau=0.0,
+        return_encoded=False
     ):
         training = self.training
         self.eval()
@@ -832,4 +911,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             # fixing determinism bug
             res = list(res)
         self.train(training)
+        if return_encoded:
+            return res, encoded
         return res
