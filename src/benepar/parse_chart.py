@@ -19,6 +19,7 @@ from . import parse_base
 from . import retokenization
 from . import subbatching
 from . import tetra_tag
+from . import vector_quantize
 
 
 class ChartParser(nn.Module, parse_base.BaseParser):
@@ -93,8 +94,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     self.project_pretrained = nn.Linear(
                         d_pretrained, hparams.d_model // 2, bias=False
                     )
-                    from vector_quantize_pytorch import VectorQuantize
-                    self.vq = VectorQuantize(
+                    self.vq = vector_quantize.VectorQuantize(
                         dim=hparams.d_model // 2,
                         n_embed=self.d_cats,
                         decay=hparams.vq_decay,
@@ -457,7 +457,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         unquantized_features = projected_features[quantization_mask]
 
                         (quantized_features, categories, commit_loss) = self.vq(
-                            unquantized_features)
+                            unquantized_features,
+                            batch["batch_num_tokens"] if "batch_num_tokens" in batch else None
+                            )
 
                         if tau > 0.0:
                             assert self.training, "expected no annealing during eval"

@@ -203,6 +203,7 @@ def run_train(args, hparams):
         optimizer = torch.optim.Adam(
             trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9
         )
+        base_lr = hparams.learning_rate
     else:
         pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
         novel_params = set(trainable_parameters) - pretrained_params
@@ -218,6 +219,7 @@ def run_train(args, hparams):
         ]
         optimizer = torch.optim.Adam(
             grouped_trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9)
+        base_lr = min(hparams.learning_rate, hparams.novel_learning_rate)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
         optimizer,
@@ -327,13 +329,6 @@ def run_train(args, hparams):
     tau = hparams.tau
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
-    split_cats_iterations = [
-        1245, 1245+312, 1245+623, 1245+934,
-        2*1245, 2*1245+312, 2*1245+623, 2*1245+934,
-        3*1245, 3*1245+312, 3*1245+623, 3*1245+934,
-        4*1245, 4*1245+312, 4*1245+623, 4*1245+934,
-        5*1245, 5*1245+312, 5*1245+623, 5*1245+934,
-        ]
 
     # dist = check_dev()
 
@@ -349,11 +344,23 @@ def run_train(args, hparams):
             if hparams.use_vq and hparams.vq_warmup_steps == 0:
                 tau = 0.0
             elif hparams.use_vq:
-                step = total_processed // hparams.batch_size
-                if step >= hparams.vq_warmup_steps:
+                step = (total_processed // hparams.batch_size) - (1245 * 2)
+                if step < 0:
+                    tau = 1.0
+                elif step >= hparams.vq_warmup_steps:
                     tau = 0.0
                 else:
                     tau = max(0.0, 1.0 - step / hparams.vq_warmup_steps)
+            
+            steps_past_warmup = (total_processed // hparams.batch_size
+                ) - hparams.learning_rate_warmup_steps
+            if steps_past_warmup > 0:
+                current_lr = min([g["lr"] for g in optimizer.param_groups])
+                new_vq_decay = 1.0 - (
+                    (1.0 - hparams.vq_decay) * (current_lr / base_lr))
+                if new_vq_decay != parser.vq.decay:
+                    parser.vq.decay = new_vq_decay
+                    print("Adjusted vq decay to:", new_vq_decay)
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
@@ -398,70 +405,14 @@ def run_train(args, hparams):
                 dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
 
-                if (hparams.discrete_cats > 0
-                        and hparams.use_vq
-                        and split_cats_iterations
-                        and iteration >= split_cats_iterations[0]
-                        ):
-                    split_cats_iterations.pop(0)
+                if (hparams.discrete_cats > 0 and hparams.use_vq):
                     ptdist = parser.vq.cluster_size.cpu().numpy()
-                    ptdist = ptdist / np.sum(ptdist)
-                    print("dist:", dist)
-                    print("pt-dist:", ptdist)
-                    # do_replace = ptdist < 1e-24
-                    do_replace = ptdist < 1e-20  # starting with split4
-                    print("Number of categories replaced:", np.sum(do_replace))
-                    random_replacements = np.random.choice(
-                        np.arange(ptdist.shape[0]),
-                        size=ptdist.shape,
-                        replace=True,
-                        p=ptdist)
-                    replacement_mapping = np.arange(ptdist.shape[0], dtype=int)
-                    replacement_mapping = np.where(
-                        do_replace,
-                        random_replacements,
-                        np.arange(ptdist.shape[0])
-                    )
-                    replacement_mapping = torch.tensor(
-                        replacement_mapping, dtype=torch.long,
-                        device=parser.vq.embed.device)
-                    parser.vq.embed = parser.vq.embed[:, replacement_mapping]
-                    parser.vq.cluster_size = parser.vq.cluster_size[replacement_mapping]
-                    parser.vq.embed_avg = parser.vq.embed_avg[:, replacement_mapping]
-                    print("Done replacing.")
+                    if np.sum(ptdist) > 0:
+                        ptdist = ptdist / np.sum(ptdist)
+                    num_categories_in_use = np.sum(ptdist > 1e-20)
+                    print("Number of categories in use:", num_categories_in_use)
 
                 if hparams.discrete_cats > 0 and not hparams.use_vq:
-                    if iteration > tag_combine_start:
-                        tag_combine_start += hparams.tag_combine_interval
-                        # Masking unused tags
-                        old_mask = parser.mask
-                        new_mask = dist < hparams.tag_combine_mask_thres
-                        new_mask = [new_m or old_m for new_m,
-                                    old_m in zip(new_mask, old_mask)]
-
-                        # print when tag disabled for first time?
-
-                        # spliting overused tags
-                        to_split = (
-                            dist > hparams.tag_split_thres).nonzero()[0]
-                        replaceable = (np.array(new_mask)).nonzero()[0]
-
-                        for original, replace in zip(to_split, replaceable):
-                            new_mask[replace] = False
-                            parser.split_tag(original, replace)
-                            print('copying tag {} into tag {}'.format(
-                                original, replace))
-
-                        # print('Dist max', np.max(dist),
-                        #       '| dist min', np.min(dist))
-                        for b in new_mask:
-                            if b:
-                                print("\n\n\n\n\n Mask Changed!")
-                                print(new_mask)
-                                print("\n\n\n\n\n")
-                                break
-                        parser.set_mask(tuple(new_mask))
-
                     # Gumbel temperature annealing
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
