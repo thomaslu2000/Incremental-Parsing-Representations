@@ -41,9 +41,12 @@ def make_hparams():
         back_loss_type='kl',
         # Discrete gumbel
         use_vq=False,
-        vq_decay=0.85,
-        vq_commitment=1.0,
-        vq_warmup_steps=0,
+        vq_decay=0.97,
+        vq_commitment=0.1,
+        vq_coreset_size_multiplier=10,
+        vq_wait_steps=1245,
+        vq_observe_steps=1245,
+        vq_interpolate_steps=1245,
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
@@ -341,16 +344,17 @@ def run_train(args, hparams):
             parser.commit_loss_accum = 0.0
             parser.train()
 
-            if hparams.use_vq and hparams.vq_warmup_steps == 0:
+            if hparams.use_vq and hparams.vq_interpolate_steps == 0:
                 tau = 0.0
             elif hparams.use_vq:
-                step = (total_processed // hparams.batch_size) - (1245 * 2)
+                step = (total_processed // hparams.batch_size) - (
+                    hparams.vq_wait_steps + hparams.vq_observe_steps)
                 if step < 0:
                     tau = 1.0
-                elif step >= hparams.vq_warmup_steps:
+                elif step >= hparams.vq_interpolate_steps:
                     tau = 0.0
                 else:
-                    tau = max(0.0, 1.0 - step / hparams.vq_warmup_steps)
+                    tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
             
             steps_past_warmup = (total_processed // hparams.batch_size
                 ) - hparams.learning_rate_warmup_steps

@@ -99,6 +99,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         n_embed=self.d_cats,
                         decay=hparams.vq_decay,
                         commitment=hparams.vq_commitment,
+                        wait_steps=hparams.vq_wait_steps,
+                        observe_steps=hparams.vq_observe_steps,
+                        coreset_size_multiplier=hparams.vq_coreset_size_multiplier,
                     )
                     self.commit_loss_accum = 0.0
                 elif self.d_cats > 0:
@@ -282,6 +285,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         config["hparams"] = nkutil.HParams(**hparams)
         parser = cls(**config)
         parser.load_state_dict(state_dict)
+
+        if hasattr(parser, 'vq'):
+            # HACK: Skip vq initialization when restoring from checkpoint.
+            parser.vq.wait_steps_remaining = 0
+            parser.vq.observe_steps_remaining = 0
+
         return parser
 
     def encode(self, example):

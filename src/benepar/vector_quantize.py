@@ -17,7 +17,17 @@ def laplace_smoothing(x, n_categories, eps=1e-5):
 
 class VectorQuantize(nn.Module):
     # Based on: https://github.com/lucidrains/vector-quantize-pytorch
-    def __init__(self, dim, n_embed, decay=0.8, commitment=1.0, eps=1e-5):
+    def __init__(
+        self,
+        dim,
+        n_embed,
+        decay=0.8,
+        commitment=1.0,
+        eps=1e-5,
+        wait_steps=0,
+        observe_steps=1245,
+        coreset_size_multiplier=10,
+    ):
         super().__init__()
 
         self.dim = dim
@@ -31,13 +41,13 @@ class VectorQuantize(nn.Module):
         self.register_buffer("cluster_size", torch.zeros(n_embed))
         self.register_buffer("embed_avg", embed.clone())
 
-        self.warmup_steps_remaining = 1245 * 2
+        self.wait_steps_remaining = wait_steps
+        self.observe_steps_remaining = observe_steps
         self.clustering_model = Streamkm(
-            coresetsize=n_embed * 10,
+            coresetsize=n_embed * coreset_size_multiplier,
             length=1500000,
             seed=42,
         )
-
         self.data_chunks = []
 
     def stream_cluster(self, input, expected_num_tokens=None):
@@ -49,16 +59,17 @@ class VectorQuantize(nn.Module):
             and sum([chunk.shape[0] for chunk in self.data_chunks])
             < expected_num_tokens
         ):
-            return
-        self.warmup_steps_remaining -= 1
-        if self.warmup_steps_remaining > 1245:
-            # No clustering for the first epoch
+            return  # This is not the last sub-batch.
+        if self.wait_steps_remaining > 0:
+            self.wait_steps_remaining -= 1
             self.data_chunks.clear()
             return
+
+        self.observe_steps_remaining -= 1
         input_np = np.concatenate(self.data_chunks, axis=0)
         self.data_chunks.clear()
         self.clustering_model.partial_fit(input_np)
-        if self.warmup_steps_remaining == 0:
+        if self.observe_steps_remaining == 0:
             print("Initializing vq clusters (this may take a while)...")
             clusters, _ = self.clustering_model.get_final_clusters(
                 self.n_embed, seed=42
@@ -78,7 +89,7 @@ class VectorQuantize(nn.Module):
             self.embed_avg.copy_(new_embed)
 
     def forward(self, input, expected_num_tokens=None):
-        if self.warmup_steps_remaining > 0:
+        if self.observe_steps_remaining > 0:
             if self.training:
                 self.stream_cluster(input, expected_num_tokens)
             return (
