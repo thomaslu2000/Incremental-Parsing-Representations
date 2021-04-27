@@ -206,33 +206,36 @@ def run_train(args, hparams):
 
     print("Initializing optimizer...")
 
-    pretrained_weights = list(
-        params for params in parser.pretrained_model.parameters() if params.requires_grad)
-    other_weights = []
-    for p in parser.parameters():
-        if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
-            other_weights.append(p)
+    # pretrained_weights = list(
+    #     params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    # other_weights = []
+    # for p in parser.parameters():
+    #     if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
+    #         other_weights.append(p)
 
-    trainable_parameters = [
-        {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
-        {'params': other_weights}
-    ]
-    
+    # trainable_parameters = [
+    #     {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
+    #     {'params': other_weights}
+    # ]
+    trainable_parameters = list(
+        params for params in parser.parameters() if params.requires_grad)
+
     if hparams.novel_learning_rate == 0.0:
         optimizer = torch.optim.Adam(
             trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
         )
     else:
-        pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
+        pretrained_params = set(trainable_parameters) & set(
+            parser.pretrained_model.parameters())
         novel_params = set(trainable_parameters) - pretrained_params
         grouped_trainable_parameters = [
-        {
-            'params': list(pretrained_params),
-            'lr': hparams.learning_rate,
+            {
+                'params': list(pretrained_params),
+                'lr': hparams.lr,
             },
             {
-            'params': list(novel_params),
-            'lr': hparams.novel_learning_rate,
+                'params': list(novel_params),
+                'lr': hparams.novel_learning_rate,
             },
         ]
         optimizer = torch.optim.Adam(
@@ -247,7 +250,8 @@ def run_train(args, hparams):
         verbose=True,
     )
 
-    clippable_parameters = pretrained_weights + other_weights
+    # pretrained_weights + other_weights
+    clippable_parameters = trainable_parameters
     grad_clip_threshold = (
         np.inf if hparams.clip_grad_norm == 0 else hparams.clip_grad_norm
     )
@@ -373,7 +377,7 @@ def run_train(args, hparams):
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
-    # dist = check_dev()
+    dist = check_dev()
 
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
@@ -469,7 +473,7 @@ def run_train(args, hparams):
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
                     en_tau = np.maximum(
-                        hparams.entau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
+                        hparams.en_tau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
                     print('setting temperature to: {:.4f}, hard attention tau to {:.3f}'.format(
                         tau, en_tau))
             else:
