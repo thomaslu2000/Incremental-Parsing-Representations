@@ -19,6 +19,7 @@ from . import parse_base
 from . import retokenization
 from . import subbatching
 from . import tetra_tag
+from . import vector_quantize
 
 
 class ChartParser(nn.Module, parse_base.BaseParser):
@@ -99,6 +100,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             )
             self.pretrained_model = AutoModel.from_pretrained(
                 hparams.pretrained_model)
+            self.use_forced_lm = hparams.use_forced_lm
             d_pretrained = self.pretrained_model.config.hidden_size
 
             if hparams.use_encoder:
@@ -106,13 +108,16 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     self.project_pretrained = nn.Linear(
                         d_pretrained, hparams.d_model // 2, bias=False
                     )
-                    from vector_quantize_pytorch import VectorQuantize
-                    self.vq = VectorQuantize(
+                    self.vq = vector_quantize.VectorQuantize(
                         dim=hparams.d_model // 2,
                         n_embed=self.d_cats,
                         decay=hparams.vq_decay,
                         commitment=hparams.vq_commitment,
+                        wait_steps=hparams.vq_wait_steps,
+                        observe_steps=hparams.vq_observe_steps,
+                        coreset_size_multiplier=hparams.vq_coreset_size_multiplier,
                     )
+                    self.commit_loss_accum = 0.0
                 elif self.d_cats > 0:
                     self.project_in = nn.Linear(
                         d_pretrained, self.d_cats, bias=False)
@@ -325,6 +330,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         config["hparams"] = nkutil.HParams(**hparams)
         parser = cls(**config)
         parser.load_state_dict(state_dict)
+
+        if hasattr(parser, 'vq'):
+            # HACK: Skip vq initialization when restoring from checkpoint.
+            parser.vq.wait_steps_remaining = 0
+            parser.vq.observe_steps_remaining = 0
+
         return parser
 
     def encode(self, example):
@@ -459,10 +470,17 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     extra_kwargs["decoder_attention_mask"] = batch[
                         "decoder_attention_mask"
                     ].to(self.device)
-
-                pretrained_out = self.pretrained_model(
-                    input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
-                )
+                if self.retokenizer.is_t5 and self.use_forced_lm:
+                    pretrained_out = self.pretrained_model(
+                        input_ids=input_ids[:, :1],
+                        attention_mask=pretrained_attention_mask[:, :1],
+                        return_dict=True,
+                        **extra_kwargs
+                    )
+                else:
+                    pretrained_out = self.pretrained_model(
+                        input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
+                    )
                 features = pretrained_out.last_hidden_state.to(
                     self.output_device) / self.pretrained_divide
                 features = features[
@@ -493,7 +511,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         unquantized_features = projected_features[quantization_mask]
 
                         (quantized_features, categories, commit_loss) = self.vq(
-                            unquantized_features)
+                            unquantized_features,
+                            batch["batch_num_tokens"] if "batch_num_tokens" in batch else None
+                            )
 
                         if tau > 0.0:
                             assert self.training, "expected no annealing during eval"
@@ -557,6 +577,34 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             features)
                         category_ret = extra_content_annotations
             # end calculating from batch
+        elif self.use_vq:
+            # Begin forcing vq categories
+            assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
+            batch_size = len(force_cats)
+            max_len = max([len(x) for x in force_cats]) + 2  # +2 for start/stop
+
+            valid_token_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
+            quantization_mask = valid_token_mask.clone()
+            categories = []
+
+            for i, sent_categories in enumerate(force_cats):
+                categories.extend(sent_categories)
+                valid_token_mask[i, :len(sent_categories)+2] = True
+                quantization_mask[i, 1:len(sent_categories)+1] = True
+            
+            categories = torch.tensor(
+                categories, dtype=torch.long, device=self.output_device)
+            valid_token_mask = valid_token_mask.to(self.output_device)
+            quantization_mask = quantization_mask.to(self.output_device)
+
+            quantized_features = F.embedding(
+                categories, self.vq.embed.transpose(0, 1))
+
+            extra_content_annotations = torch.zeros(
+                (batch_size, max_len, quantized_features.shape[-1]),
+                dtype=quantized_features.dtype, device=quantized_features.device
+            )
+            extra_content_annotations[quantization_mask] = quantized_features
         else:
             # Begin forcing gumbel categories
             assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
@@ -693,6 +741,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
             span_loss += back_loss / batch["batch_num_tokens"]
 
+        if self.use_vq:
+            self.commit_loss_accum += float(commit_loss.cpu())
+
         if tag_scores is None:
             return span_loss + commit_loss
         else:
@@ -813,7 +864,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             if self.check_force_cats(examples):
                 span_scores, tag_scores, categories, _ = self.forward(
                     batch=None, force_cats=examples)
-                lengths = np.array([len(example) - 2 for example in examples])
+                if self.use_vq:
+                    lengths = np.array([len(example) for example in examples])
+                else:
+                    lengths = np.array([len(example) - 2 for example in examples])
             else:
                 batch = self.pad_encoded(encoded)
                 span_scores, tag_scores, categories, _ = self.forward(batch, tau)
@@ -834,8 +888,13 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         if self.check_force_cats(examples):
             for i in range(len(examples)):
-                yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
+                if self.use_vq:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i]])
+                else:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
             return
+        
+        categories_np = categories.cpu().numpy()
 
         for i in range(len(encoded)):
             example_len = len(examples[i].words)
@@ -862,7 +921,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             predicted_tags, examples[i].pos()
                         )
                     ]
-                if return_cats:
+                if return_cats and self.use_vq:
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories_np[i,1:example_len+1]
+                elif return_cats:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories[i]
                 else:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves)

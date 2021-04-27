@@ -6,6 +6,7 @@ import os
 import time
 
 import torch
+import torch.nn.functional as F
 
 import numpy as np
 
@@ -40,9 +41,12 @@ def make_hparams():
         back_loss_type='kl',
         # Discrete gumbel
         use_vq=False,
-        vq_decay=0.85,
-        vq_commitment=1.0,
-        vq_warmup_steps=0,
+        vq_decay=0.97,
+        vq_commitment=0.1,
+        vq_coreset_size_multiplier=10,
+        vq_wait_steps=1245,
+        vq_observe_steps=1245,
+        vq_interpolate_steps=1245,
         discrete_cats=0,
         tau=3.0,
         anneal_rate=2e-5,
@@ -51,7 +55,6 @@ def make_hparams():
         tau_min=0.05,
         pretrained_divide=1.0,
         encoder_gum=False,
-        tag_dist='',
         tags_per_word=1,
         tag_combine_start=np.inf,
         tag_combine_interval=300,
@@ -80,6 +83,7 @@ def make_hparams():
         # BERT and other pre-trained models
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
+        use_forced_lm=False,
         # Partitioned transformer encoder
         uni=False,
         all_layers_uni=False,
@@ -222,6 +226,7 @@ def run_train(args, hparams):
         optimizer = torch.optim.Adam(
             trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
         )
+        base_lr = hparams.learning_rate
     else:
         pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
         novel_params = set(trainable_parameters) - pretrained_params
@@ -237,6 +242,7 @@ def run_train(args, hparams):
         ]
         optimizer = torch.optim.Adam(
             grouped_trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9)
+        base_lr = min(hparams.learning_rate, hparams.novel_learning_rate)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
         optimizer,
@@ -284,30 +290,14 @@ def run_train(args, hparams):
             dev_predicted = dev_predicted_and_cats
             dist = None
         else:
-            if hparams.tag_dist:
-                tag_distribution = np.zeros(
-                    (len(tag_vocab), hparams.discrete_cats))
-                dist = torch.zeros(hparams.discrete_cats)
-                dev_predicted = []
-                for (dev_tree, cat), example, encode in zip(dev_predicted_and_cats, dev_treebank, encoded):
-                    categories = cat.argmax(-1).cpu().numpy()
-                    try:
-                        for i, pos in enumerate(example.pos()):
-                            tag_distribution[tag_vocab[pos[1]],
-                                             categories[encode['words_from_tokens'][i + 1]]] += 1
-                    except:
-                        pass
-                    dev_predicted.append(dev_tree)
-                    dist += cat.sum(dim=0).cpu()
-                dist /= dist.sum()
-                print(hparams.tag_dist)
-            else:
-                dist = torch.zeros(hparams.discrete_cats)
-                dev_predicted = []
-                for dev_tree, cat in dev_predicted_and_cats:
-                    dev_predicted.append(dev_tree)
-                    dist += cat.sum(dim=0).cpu()
-                dist /= dist.sum()
+            dist = torch.zeros(hparams.discrete_cats)
+            dev_predicted = []
+            for dev_tree, cat in dev_predicted_and_cats:
+                dev_predicted.append(dev_tree)
+                if len(cat.shape) == 1:
+                    cat = F.one_hot(torch.tensor(cat), hparams.discrete_cats)
+                dist += cat.sum(dim=0).cpu()
+            dist /= dist.sum()
 
         print(dist)
 
@@ -381,16 +371,30 @@ def run_train(args, hparams):
         for batch_num, batch in enumerate(data_loader, start=1):
             iteration += 1
             optimizer.zero_grad()
+            parser.commit_loss_accum = 0.0
             parser.train()
 
-            if hparams.use_vq and hparams.vq_warmup_steps == 0:
+            if hparams.use_vq and hparams.vq_interpolate_steps == 0:
                 tau = 0.0
             elif hparams.use_vq:
-                step = total_processed // hparams.batch_size
-                if step >= hparams.vq_warmup_steps:
+                step = (total_processed // hparams.batch_size) - (
+                    hparams.vq_wait_steps + hparams.vq_observe_steps)
+                if step < 0:
+                    tau = 1.0
+                elif step >= hparams.vq_interpolate_steps:
                     tau = 0.0
                 else:
-                    tau = max(0.0, 1.0 - step / hparams.vq_warmup_steps)
+                    tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
+            
+            steps_past_warmup = (total_processed // hparams.batch_size
+                ) - hparams.learning_rate_warmup_steps
+            if steps_past_warmup > 0:
+                current_lr = min([g["lr"] for g in optimizer.param_groups])
+                new_vq_decay = 1.0 - (
+                    (1.0 - hparams.vq_decay) * (current_lr / base_lr))
+                if new_vq_decay != parser.vq.decay:
+                    parser.vq.decay = new_vq_decay
+                    print("Adjusted vq decay to:", new_vq_decay)
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
@@ -409,62 +413,40 @@ def run_train(args, hparams):
 
             optimizer.step()
 
-            # print(
-            #     "epoch {:,} "
-            #     "batch {:,}/{:,} "
-            #     "processed {:,} "
-            #     "batch-loss {:.4f} "
-            #     "grad-norm {:.4f} "
-            #     "epoch-elapsed {} "
-            #     "total-elapsed {}".format(
-            #         epoch,
-            #         batch_num,
-            #         int(np.ceil(len(train_treebank) / hparams.batch_size)),
-            #         total_processed,
-            #         batch_loss_value,
-            #         grad_norm,
-            #         format_elapsed(epoch_start_time),
-            #         format_elapsed(start_time),
-            #     )
-            # )
+            print(
+                "epoch {:,} "
+                "batch {:,}/{:,} "
+                "processed {:,} "
+                "batch-loss {:.4f} "
+                "grad-norm {:.4f} "
+                "commit-loss {:.4f} "
+                "epoch-elapsed {} "
+                "total-elapsed {}".format(
+                    epoch,
+                    batch_num,
+                    int(np.ceil(len(train_treebank) / hparams.batch_size)),
+                    total_processed,
+                    batch_loss_value,
+                    grad_norm,
+                    float(parser.commit_loss_accum),
+                    format_elapsed(epoch_start_time),
+                    format_elapsed(start_time),
+                )
+            )
 
             if current_processed >= check_every:
                 current_processed -= check_every
                 dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
 
+                if (hparams.discrete_cats > 0 and hparams.use_vq):
+                    ptdist = parser.vq.cluster_size.cpu().numpy()
+                    if np.sum(ptdist) > 0:
+                        ptdist = ptdist / np.sum(ptdist)
+                    num_categories_in_use = np.sum(ptdist > 1e-20)
+                    print("Number of categories in use:", num_categories_in_use)
+
                 if hparams.discrete_cats > 0 and not hparams.use_vq:
-                    if iteration > tag_combine_start:
-                        tag_combine_start += hparams.tag_combine_interval
-                        # Masking unused tags
-                        old_mask = parser.mask
-                        new_mask = dist < hparams.tag_combine_mask_thres
-                        new_mask = [new_m or old_m for new_m,
-                                    old_m in zip(new_mask, old_mask)]
-
-                        # print when tag disabled for first time?
-
-                        # spliting overused tags
-                        to_split = (
-                            dist > hparams.tag_split_thres).nonzero()[0]
-                        replaceable = (np.array(new_mask)).nonzero()[0]
-
-                        for original, replace in zip(to_split, replaceable):
-                            new_mask[replace] = False
-                            parser.split_tag(original, replace)
-                            print('copying tag {} into tag {}'.format(
-                                original, replace))
-
-                        # print('Dist max', np.max(dist),
-                        #       '| dist min', np.min(dist))
-                        for b in new_mask:
-                            if b:
-                                print("\n\n\n\n\n Mask Changed!")
-                                print(new_mask)
-                                print("\n\n\n\n\n")
-                                break
-                        parser.set_mask(tuple(new_mask))
-
                     # Gumbel temperature annealing
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
