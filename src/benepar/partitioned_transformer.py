@@ -116,14 +116,13 @@ class PartitionedMultiHeadAttention(nn.Module):
             n_head, d_qkv // 2, d_model // 2))
 
         bound = math.sqrt(3.0) * initializer_range
-        self.use_gum = False
         for param in [self.w_qkv_c, self.w_qkv_p, self.w_o_c, self.w_o_p]:
             nn.init.uniform_(param, -bound, bound)
         self.scaling_factor = 1 / d_qkv ** 0.5
 
         self.dropout = nn.Dropout(attention_dropout)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, att_v=None, tau=0):
         if isinstance(x, tuple):
             x_c, x_p = x
         else:
@@ -138,11 +137,20 @@ class PartitionedMultiHeadAttention(nn.Module):
         k = torch.cat([k_c, k_p], dim=-1)
         v = torch.cat([v_c, v_p], dim=-1)
         dots = torch.einsum("bhqa,bhka->bhqk", q, k)
+        # print('dots shape', dots.shape)
         if mask is not None:
-            dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
+            if len(mask.shape) == 3:  # batch x words x words
+                dots.data.masked_fill_(~mask[:, None, :, :], -float("inf"))
+            else:  # batch x words
+                dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
 
-        if self.use_gum:
-            probs = F.gumbel_softmax(dots, hard=True, dim=-1)
+        if att_v is not None:
+            if tau > 0:
+                probs = F.gumbel_softmax(dots, hard=True, dim=-1, tau=tau)
+            else:
+                probs = F.one_hot(torch.argmax(dots, dim=-1), num_classes=dots.shape[-1]).type(
+                    torch.FloatTensor)
+            v = att_v
         else:
             probs = F.softmax(dots, dim=-1)
         probs = self.dropout(probs)
@@ -180,11 +188,14 @@ class PartitionedTransformerEncoderLayer(nn.Module):
 
         self.activation = activation
 
-    def forward(self, x, mask=None):
-        residual = self.self_attn(x, mask=mask)
+    def forward(self, x, mask=None, att_v=None, in_x=None, tau=0):
+        residual = self.self_attn(x, mask=mask, att_v=att_v, tau=tau)
         residual = torch.cat(residual, dim=-1)
         residual = self.residual_dropout_attn(residual)
-        x = self.norm_attn(x + residual)
+        if in_x is not None:
+            x = self.norm_attn(in_x + residual)
+        else:
+            x = self.norm_attn(x + residual)
         residual = self.linear2(self.ff_dropout(
             self.activation(self.linear1(x))))
         residual = torch.cat(residual, dim=-1)
@@ -194,17 +205,26 @@ class PartitionedTransformerEncoderLayer(nn.Module):
 
 
 class PartitionedTransformerEncoder(nn.Module):
-    def __init__(self, encoder_layer, n_layers, gum=False):
+    def __init__(self, encoder_layer, n_layers, custom_first=None):
         super().__init__()
+        modules = []
+        if custom_first is not None:
+            n_layers -= 1
+            modules.append(copy.deepcopy(custom_first))
+        modules += [copy.deepcopy(encoder_layer) for i in range(n_layers)]
         self.layers = nn.ModuleList(
-            [copy.deepcopy(encoder_layer) for i in range(n_layers)]
+            modules
         )
-        if gum:
-            self.layers[0].self_attn.use_gum = True
 
-    def forward(self, x, mask=None):
-        for layer in self.layers:
-            x = layer(x, mask=mask)
+    def forward(self, x, mask=None, att_v=None, in_x=None, first_layer_mask=None, tau=1e-9):
+        for i, layer in enumerate(self.layers):
+            if i == 0:
+                if first_layer_mask is None:
+                    first_layer_mask = mask
+                x = layer(x, mask=first_layer_mask,
+                          att_v=att_v, in_x=in_x, tau=tau)
+            else:
+                x = layer(x, mask=mask)
         return x
 
 

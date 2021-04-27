@@ -4,6 +4,30 @@ from benepar import ptb_unescape
 from treebanks import ParsingExample
 
 
+def cb_traverse(tree):
+    if isinstance(tree, str):
+        return tree
+    elif len(tree) == 1:
+        if isinstance(tree[0], str):
+            return tree
+        return cb_traverse(tree[0])
+    else:
+        left_child = cb_traverse(tree[0])
+        if len(tree) == 2:
+            right_tree = tree[1]
+        else:
+            right_tree = Tree("", tree[1:])
+        right_child = cb_traverse(right_tree)
+        return Tree(tree.label(), [left_child, right_child])
+
+
+def collapse_binarize(tree):
+    c = cb_traverse(tree)
+    if len(c) == 1 and isinstance(c[0], str):
+        c = Tree(tree.label(), [c])
+    return c
+
+
 def cub_traverse(tree, default_label='S'):
     if isinstance(tree, str):
         return tree
@@ -16,7 +40,7 @@ def cub_traverse(tree, default_label='S'):
         if len(tree) == 2:
             right_tree = tree[1]
         else:
-            right_tree = Tree('dummy', tree[1:])
+            right_tree = Tree('', tree[1:])
         right_child = cub_traverse(right_tree)
         return Tree(default_label, [left_child, right_child])
 
