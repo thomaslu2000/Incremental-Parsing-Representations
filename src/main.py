@@ -68,7 +68,7 @@ def make_hparams():
         # Optimization
         batch_size=32,
         novel_learning_rate=0.,  # don't use separate learning rate
-        lr=0.00005,
+        learning_rate=0.00005,
         pretrained_lr=0.00005,
         learning_rate_warmup_steps=160,
         clip_grad_norm=0.0,  # no clipping
@@ -85,6 +85,7 @@ def make_hparams():
         pretrained_model="bert-base-uncased",
         use_forced_lm=False,
         # Partitioned transformer encoder
+        tag_dist='',
         uni=False,
         all_layers_uni=False,
         first_heads=-1,
@@ -210,23 +211,23 @@ def run_train(args, hparams):
 
     print("Initializing optimizer...")
 
-    # pretrained_weights = list(
-    #     params for params in parser.pretrained_model.parameters() if params.requires_grad)
-    # other_weights = []
-    # for p in parser.parameters():
-    #     if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
-    #         other_weights.append(p)
+    pretrained_weights = list(
+        params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    other_weights = []
+    for p in parser.parameters():
+        if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
+            other_weights.append(p)
 
-    # trainable_parameters = [
-    #     {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
-    #     {'params': other_weights}
-    # ]
-    trainable_parameters = list(
-        params for params in parser.parameters() if params.requires_grad)
+    trainable_parameters = [
+        {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
+        {'params': other_weights}
+    ]
+    # trainable_parameters = list(
+    #     params for params in parser.parameters() if params.requires_grad)
 
     if hparams.novel_learning_rate == 0.0:
         optimizer = torch.optim.Adam(
-            trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
+            trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9
         )
         base_lr = hparams.learning_rate
     else:
@@ -236,7 +237,7 @@ def run_train(args, hparams):
         grouped_trainable_parameters = [
             {
                 'params': list(pretrained_params),
-                'lr': hparams.lr,
+                'lr': hparams.learning_rate,
             },
             {
                 'params': list(novel_params),
@@ -244,7 +245,7 @@ def run_train(args, hparams):
             },
         ]
         optimizer = torch.optim.Adam(
-            grouped_trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9)
+            grouped_trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9)
         base_lr = min(hparams.learning_rate, hparams.novel_learning_rate)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
@@ -256,8 +257,7 @@ def run_train(args, hparams):
         verbose=True,
     )
 
-    # pretrained_weights + other_weights
-    clippable_parameters = trainable_parameters
+    clippable_parameters = pretrained_weights + other_weights
     grad_clip_threshold = (
         np.inf if hparams.clip_grad_norm == 0 else hparams.clip_grad_norm
     )
@@ -322,9 +322,9 @@ def run_train(args, hparams):
 
         if dev_fscore.fscore > best_dev_fscore:
 
-            if hparams.tag_dist:
-                with open(hparams.tag_dist, 'wb') as f:
-                    np.save(f, tag_distribution)
+            # if hparams.tag_dist:
+            #     with open(hparams.tag_dist, 'wb') as f:
+            #         np.save(f, tag_distribution)
 
             if best_dev_model_path is not None:
                 extensions = [".pt"]
@@ -367,7 +367,7 @@ def run_train(args, hparams):
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
-    dist = check_dev()
+    # dist = check_dev()
 
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
@@ -389,14 +389,14 @@ def run_train(args, hparams):
                     tau = 0.0
                 else:
                     tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
-            
+
             steps_past_warmup = (total_processed // hparams.batch_size
-                ) - hparams.learning_rate_warmup_steps
+                                 ) - hparams.learning_rate_warmup_steps
             if steps_past_warmup > 0:
                 current_lr = min([g["lr"] for g in optimizer.param_groups])
                 new_vq_decay = 1.0 - (
                     (1.0 - hparams.vq_decay) * (current_lr / base_lr))
-                if new_vq_decay != parser.vq.decay:
+                if hparams.use_vq and new_vq_decay != parser.vq.decay:
                     parser.vq.decay = new_vq_decay
                     print("Adjusted vq decay to:", new_vq_decay)
 

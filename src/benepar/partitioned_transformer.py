@@ -144,6 +144,9 @@ class PartitionedMultiHeadAttention(nn.Module):
             else:  # batch x words
                 dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
 
+        # if mask is not None:
+        #     dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
+
         if att_v is not None:
             if tau > 0:
                 probs = F.gumbel_softmax(dots, hard=True, dim=-1, tau=tau)
