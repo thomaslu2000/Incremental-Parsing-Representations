@@ -356,15 +356,16 @@ def run_train(args, hparams):
                 else:
                     tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
             
-            steps_past_warmup = (total_processed // hparams.batch_size
-                ) - hparams.learning_rate_warmup_steps
-            if steps_past_warmup > 0:
-                current_lr = min([g["lr"] for g in optimizer.param_groups])
-                new_vq_decay = 1.0 - (
-                    (1.0 - hparams.vq_decay) * (current_lr / base_lr))
-                if new_vq_decay != parser.vq.decay:
-                    parser.vq.decay = new_vq_decay
-                    print("Adjusted vq decay to:", new_vq_decay)
+            if hparams.use_vq:
+                steps_past_warmup = (total_processed // hparams.batch_size
+                    ) - hparams.learning_rate_warmup_steps
+                if steps_past_warmup > 0:
+                    current_lr = min([g["lr"] for g in optimizer.param_groups])
+                    new_vq_decay = 1.0 - (
+                        (1.0 - hparams.vq_decay) * (current_lr / base_lr))
+                    if new_vq_decay != parser.vq.decay:
+                        parser.vq.decay = new_vq_decay
+                        print("Adjusted vq decay to:", new_vq_decay)
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
