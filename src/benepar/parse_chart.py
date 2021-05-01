@@ -282,6 +282,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         if "force_root_constituent" not in hparams:
             hparams["force_root_constituent"] = True
+        if "bpe_dropout" not in hparams:
+            hparams["bpe_dropout"] = 0.0
 
         config["hparams"] = nkutil.HParams(**hparams)
         parser = cls(**config)
