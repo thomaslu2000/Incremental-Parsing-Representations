@@ -87,6 +87,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.pretrained_model = AutoModel.from_pretrained(
                 hparams.pretrained_model)
             self.use_forced_lm = hparams.use_forced_lm
+            self.bpe_dropout = hparams.bpe_dropout
             d_pretrained = self.pretrained_model.config.hidden_size
 
             if hparams.use_encoder:
@@ -293,7 +294,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         return parser
 
-    def encode(self, example):
+    def encode(self, example, use_bpe_dropout=False):
 
         if self.two_label_subspan is not None and self.two_label_subspan is not False:
             example = self.two_label_subspan(example, self.tree_transform)
@@ -301,7 +302,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         if self.char_encoder is not None:
             encoded = self.retokenizer(example.words, return_tensors="np")
         else:
-            encoded = self.retokenizer(example.words, example.space_after)
+            encoded = self.retokenizer(example.words, example.space_after,
+                dropout=(self.bpe_dropout if use_bpe_dropout else None))
 
         if example.tree is not None:
             encoded["span_labels"] = torch.tensor(
@@ -371,7 +373,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
     def encode_and_collate_subbatches(self, examples, subbatch_max_tokens):
         batch_size = len(examples)
         batch_num_tokens = sum(len(x.words) for x in examples)
-        encoded = [self.encode(example) for example in examples]
+        encoded = [self.encode(example, use_bpe_dropout=True) for example in examples]
 
         res = []
         for ids, subbatch_encoded in subbatching.split(

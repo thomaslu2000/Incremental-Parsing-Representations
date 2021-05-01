@@ -79,6 +79,7 @@ def make_hparams():
         # BERT and other pre-trained models
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
+        bpe_dropout=0.0,
         use_forced_lm=False,
         # Partitioned transformer encoder
         use_encoder=False,
