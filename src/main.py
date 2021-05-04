@@ -68,7 +68,7 @@ def make_hparams():
         # Optimization
         batch_size=32,
         novel_learning_rate=0.,  # don't use separate learning rate
-        lr=0.00005,
+        learning_rate=0.00005,
         pretrained_lr=0.00005,
         learning_rate_warmup_steps=160,
         clip_grad_norm=0.0,  # no clipping
@@ -86,6 +86,7 @@ def make_hparams():
         bpe_dropout=0.0,
         use_forced_lm=False,
         # Partitioned transformer encoder
+        tag_dist='',
         uni=False,
         all_layers_uni=False,
         first_heads=-1,
@@ -222,27 +223,33 @@ def run_train(args, hparams):
         {'params': pretrained_weights, 'lr': hparams.pretrained_lr},
         {'params': other_weights}
     ]
-    
+    # trainable_parameters = list(
+    #     params for params in parser.parameters() if params.requires_grad)
+
     if hparams.novel_learning_rate == 0.0:
         optimizer = torch.optim.Adam(
-            trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9
+            trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9
         )
         base_lr = hparams.learning_rate
     else:
-        pretrained_params = set(trainable_parameters) & set(parser.pretrained_model.parameters())
+        trainable_parameters = list(
+            params for params in parser.parameters() if params.requires_grad)
+
+        pretrained_params = set(trainable_parameters) & set(
+            parser.pretrained_model.parameters())
         novel_params = set(trainable_parameters) - pretrained_params
         grouped_trainable_parameters = [
-        {
-            'params': list(pretrained_params),
-            'lr': hparams.learning_rate,
+            {
+                'params': list(pretrained_params),
+                'lr': hparams.learning_rate,
             },
             {
-            'params': list(novel_params),
-            'lr': hparams.novel_learning_rate,
+                'params': list(novel_params),
+                'lr': hparams.novel_learning_rate,
             },
         ]
         optimizer = torch.optim.Adam(
-            grouped_trainable_parameters, lr=hparams.lr, betas=(0.9, 0.98), eps=1e-9)
+            grouped_trainable_parameters, lr=hparams.learning_rate, betas=(0.9, 0.98), eps=1e-9)
         base_lr = min(hparams.learning_rate, hparams.novel_learning_rate)
 
     scheduler = learning_rates.WarmupThenReduceLROnPlateau(
@@ -319,9 +326,9 @@ def run_train(args, hparams):
 
         if dev_fscore.fscore > best_dev_fscore:
 
-            if hparams.tag_dist:
-                with open(hparams.tag_dist, 'wb') as f:
-                    np.save(f, tag_distribution)
+            # if hparams.tag_dist:
+            #     with open(hparams.tag_dist, 'wb') as f:
+            #         np.save(f, tag_distribution)
 
             if best_dev_model_path is not None:
                 extensions = [".pt"]
@@ -386,7 +393,6 @@ def run_train(args, hparams):
                     tau = 0.0
                 else:
                     tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
-            
             if hparams.use_vq:
                 steps_past_warmup = (total_processed // hparams.batch_size
                     ) - hparams.learning_rate_warmup_steps
@@ -453,7 +459,7 @@ def run_train(args, hparams):
                     tau = np.maximum(
                         hparams.tau * np.exp(-hparams.anneal_rate * iteration), hparams.tau_min)
                     en_tau = np.maximum(
-                        hparams.entau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
+                        hparams.en_tau * np.exp(-hparams.en_anneal_rate * iteration), hparams.tau_min)
                     print('setting temperature to: {:.4f}, hard attention tau to {:.3f}'.format(
                         tau, en_tau))
             else:

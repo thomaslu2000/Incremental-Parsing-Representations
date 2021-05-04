@@ -137,24 +137,28 @@ class PartitionedMultiHeadAttention(nn.Module):
         k = torch.cat([k_c, k_p], dim=-1)
         v = torch.cat([v_c, v_p], dim=-1)
         dots = torch.einsum("bhqa,bhka->bhqk", q, k)
-        # print('dots shape', dots.shape)
+
         if mask is not None:
             if len(mask.shape) == 3:  # batch x words x words
                 dots.data.masked_fill_(~mask[:, None, :, :], -float("inf"))
             else:  # batch x words
                 dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
 
+        # if mask is not None:
+        #     dots.data.masked_fill_(~mask[:, None, None, :], -float("inf"))
+
         if att_v is not None:
             if tau > 0:
                 probs = F.gumbel_softmax(dots, hard=True, dim=-1, tau=tau)
             else:
                 probs = F.one_hot(torch.argmax(dots, dim=-1), num_classes=dots.shape[-1]).type(
-                    torch.FloatTensor)
+                    torch.FloatTensor).to(att_v.device)
             v = att_v
         else:
             probs = F.softmax(dots, dim=-1)
         probs = self.dropout(probs)
         o = torch.einsum("bhqk,bhka->bhqa", probs, v)
+
         o_c, o_p = torch.chunk(o, 2, dim=-1)
         out_c = torch.einsum("bhta,haf->btf", o_c, self.w_o_c)
         out_p = torch.einsum("bhta,haf->btf", o_p, self.w_o_p)

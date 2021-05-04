@@ -4,12 +4,16 @@ from benepar import Parser, InputSentence
 from benepar.parse_base import BaseInputExample
 import numpy as np
 from nltk.tree import Tree
+import treebanks
+from treebanks import ParsingExample, Treebank
+from benepar import tetra_tag
 
 
 class IParser():
     def __init__(self, model_path_base):
         self.nltk_wrapper = Parser(model_path_base)
         self.parser = self.nltk_wrapper._parser
+        self.tag_vocab = self.parser.tag_vocab
 
     def remove_pos(self, tree):
         """
@@ -28,13 +32,14 @@ class IParser():
     def parse_sentence(self, words):
         if isinstance(words, str):
             words = words.split()
-        
+
         if isinstance(words, BaseInputExample):
             inputs = [words]
             words = words.words
         else:
             inputs = [InputSentence(words=words)]
-            inputs = [self.nltk_wrapper._with_missing_fields_filled(x) for x in inputs]
+            inputs = [self.nltk_wrapper._with_missing_fields_filled(
+                x) for x in inputs]
 
         tree, cats = self.parser.parse(
             inputs, return_cats=True, tau=0)[0]
@@ -43,7 +48,7 @@ class IParser():
         leaf_treepositions = tree.treepositions('leaves')
         for i, leaf_treeposition in enumerate(leaf_treepositions):
             tree[leaf_treeposition] = tree[leaf_treeposition
-                ] + "\n {}".format(cats[i])
+                                           ] + "\n {}".format(cats[i])
         return tree, cats
 
     def parse_batch(self, batched_words):
@@ -51,7 +56,7 @@ class IParser():
         for words in batched_words:
             if isinstance(words, str):
                 words = words.split()
-            
+
             if isinstance(words, BaseInputExample):
                 inputs.append(words)
             else:
@@ -67,7 +72,7 @@ class IParser():
             leaf_treepositions = tree.treepositions('leaves')
             for i, leaf_treeposition in enumerate(leaf_treepositions):
                 tree[leaf_treeposition] = tree[leaf_treeposition
-                    ] + "\n {}".format(cats[i])
+                                               ] + "\n {}".format(cats[i])
             predicted[j] = (tree, cats)
 
         return predicted
@@ -83,5 +88,34 @@ class IParser():
             leaf_treepositions = tree.treepositions('leaves')
             for i, leaf_treeposition in enumerate(leaf_treepositions):
                 tree[leaf_treeposition] = "{} \n".format(words[i]
-                    ) + tree[leaf_treeposition]
+                                                         ) + tree[leaf_treeposition]
         return tree
+
+    def load_dev(self, path='../data/22.auto.clean', max_len_dev=40):
+        dev_treebank = treebanks.load_trees(
+            path, None, 'default'
+        )
+        dev_treebank = dev_treebank.filter_by_length(max_len_dev)
+        return dev_treebank
+
+    def get_tag_dist(self, dev_treebank):
+        dev_predicted_and_cats, encoded = self.parser.parse(
+            dev_treebank.without_gold_annotations(),
+            subbatch_max_tokens=2000,
+            tau=0.0,
+            return_cats=True,
+            return_encoded=True
+        )
+        tag_distribution = np.zeros(
+            (len(self.tag_vocab), self.parser.d_cats))
+        for (dev_tree, cat), example, encode in zip(dev_predicted_and_cats, dev_treebank, encoded):
+
+            # w x
+            categories = cat.argmax(-1)
+            try:
+                for i, pos in enumerate(example.pos()):
+                    tag_distribution[self.tag_vocab[pos[1]],
+                                     categories[encode['words_from_tokens'][i + 1]]] += 1
+            except:
+                pass
+        return tag_distribution

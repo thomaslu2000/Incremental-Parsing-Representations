@@ -68,7 +68,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.all_layers_uni = False
 
         self.d_cats = hparams.discrete_cats
-        self.use_vq = hparams.use_vq
+        try:
+            self.use_vq = hparams.use_vq
+        except:
+            self.use_vq = False
 
         try:
             self.tags_per_word = hparams.tags_per_word
@@ -226,7 +229,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     else:
                         seq_dim = hparams.d_model // 2
                     self.f_back = nn.Sequential(
-                        # layer norm then linear, no relu
                         nn.Linear(hparams.d_model, hparams.d_label_hidden),
                         nn.LayerNorm(hparams.d_label_hidden),
                         nn.ReLU(),
@@ -322,6 +324,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         for child in self.children():
             if child != self.pretrained_model:
                 child.to(self.output_device)
+
         self.pretrained_model.parallelize(*args, **kwargs)
 
     @classmethod
@@ -521,7 +524,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         # tokens, but those will receive an all-zero content
                         # embedding. Note that GPT-2 does not use a start token,
                         # so the default setting in retokenization.py is to use
-                        # the GPT-2 *stop token* embedding at that position. 
+                        # the GPT-2 *stop token* embedding at that position.
                         # That would violate incrementality, so we mask it out.
                         quantization_mask = valid_token_mask.clone()
                         quantization_mask[:, 0] = False
@@ -532,11 +535,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                         projected_features = self.project_pretrained(features)
                         unquantized_features = projected_features[quantization_mask]
-
-                        (quantized_features, categories, commit_loss) = self.vq(
+                        (quantized_features, categories, commit_loss, dist) = self.vq(
                             unquantized_features,
                             batch["batch_num_tokens"] if "batch_num_tokens" in batch else None
-                            )
+                        )
 
                         if tau > 0.0:
                             assert self.training, "expected no annealing during eval"
@@ -544,19 +546,33 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                                 (1.0 - tau) * quantized_features
                                 + tau * unquantized_features)
 
-                        extra_content_annotations = torch.zeros_like(projected_features)
+                        extra_content_annotations = torch.zeros_like(
+                            projected_features)
                         extra_content_annotations[quantization_mask] = quantized_features
 
-                        category_ret = torch.zeros(
-                            projected_features.shape[:-1],
-                            dtype=categories.dtype,
-                            device=categories.device,
-                        )
-                        category_ret[quantization_mask] = categories
+                        if return_cat_logits:
+                            if dist is None:
+                                category_ret = None
+                            else:
+                                category_ret = torch.zeros(
+                                    (*
+                                     projected_features.shape[:-1], self.d_cats),
+                                    dtype=projected_features.dtype,
+                                    device=categories.device,
+                                )
+                                category_ret[quantization_mask] = dist
+                        else:
+                            category_ret = torch.zeros(
+                                projected_features.shape[:-1],
+                                dtype=categories.dtype,
+                                device=categories.device,
+                            )
+                            category_ret[quantization_mask] = categories
 
                         if tau > 0.0:
                             assert self.training, "expected no annealing during eval"
-                            extra_content_annotations[:, 0] = tau * projected_features[:, 0]
+                            extra_content_annotations[:,
+                                                      0] = tau * projected_features[:, 0]
                             extra_content_annotations[
                                 torch.arange(features.shape[0]),
                                 valid_token_mask.sum(1) - 1,
@@ -567,32 +583,40 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                             commit_loss = commit_loss * (1.0 - tau)
 
-                        commit_loss = commit_loss * unquantized_features.shape[0] * unquantized_features.shape[1]
+                        commit_loss = commit_loss * \
+                            unquantized_features.shape[0] * \
+                            unquantized_features.shape[1]
                     elif self.d_cats > 0:
+                        assert self.tags_per_word == 1, 'Disabling tags per word'
+
                         category_logits = self.project_in(features)
 
                         mask = torch.BoolTensor(
                             np.tile(self.mask, (category_logits.shape[0], category_logits.shape[1], 1))).to(self.device)
+                        # mask = torch.BoolTensor(self.mask).repeat(
+                        #     category_logits.shape[0], category_logits.shape[1], 1)
                         category_logits = category_logits.masked_fill(
                             mask, -1e9)
                         b, w, d = category_logits.shape
-                        category_logits = category_logits.reshape(
-                            b, w, self.tags_per_word, d // self.tags_per_word)
+                        # category_logits = category_logits.reshape(
+                        #     b, w, self.tags_per_word, d // self.tags_per_word)
                         if tau > 0:
                             cats = F.gumbel_softmax(
                                 category_logits, dim=-1, tau=tau, hard=True)
                         else:
                             # when tau == 0, take the argmax (for deterministic testing)
                             max_idx = torch.argmax(category_logits, dim=-1)
-                            cats = F.one_hot(max_idx, num_classes=self.d_cats // self.tags_per_word).type(
+                            cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
                                 torch.FloatTensor).to(self.output_device)
+                            # cats = F.one_hot(max_idx, num_classes=self.d_cats // self.tags_per_word).type(
+                            #     torch.FloatTensor).to(self.output_device)
 
                         if return_cat_logits:
-                            category_ret = category_logits.reshape(b, w, d)
+                            category_ret = category_logits  # .reshape(b, w, d)
                         else:
-                            category_ret = cats.reshape(b, w, d)
+                            category_ret = cats  # .reshape(b, w, d)
 
-                        cats = cats.reshape(b, w, d)
+                        #cats = cats.reshape(b, w, d)
 
                         extra_content_annotations = self.project_out(cats)
                     else:
@@ -604,17 +628,19 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             # Begin forcing vq categories
             assert self.encoder is not None and self.d_cats > 0, "Forcing categories only supported with discretization"
             batch_size = len(force_cats)
-            max_len = max([len(x) for x in force_cats]) + 2  # +2 for start/stop
+            max_len = max([len(x) for x in force_cats]) + \
+                2  # +2 for start/stop
 
-            valid_token_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
+            valid_token_mask = torch.zeros(
+                (batch_size, max_len), dtype=torch.bool)
             quantization_mask = valid_token_mask.clone()
             categories = []
 
             for i, sent_categories in enumerate(force_cats):
                 categories.extend(sent_categories)
-                valid_token_mask[i, :len(sent_categories)+2] = True
-                quantization_mask[i, 1:len(sent_categories)+1] = True
-            
+                valid_token_mask[i, :len(sent_categories) + 2] = True
+                quantization_mask[i, 1:len(sent_categories) + 1] = True
+
             categories = torch.tensor(
                 categories, dtype=torch.long, device=self.output_device)
             valid_token_mask = valid_token_mask.to(self.output_device)
@@ -641,7 +667,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             b, w, tpw, d = cats.shape
             cats = cats.reshape(b, w, tpw * d)
             valid_token_mask = np.ones((b, w))
-            
+
             valid_token_mask = torch.BoolTensor(
                 valid_token_mask).to(self.output_device)
             extra_content_annotations = self.project_out(cats)
@@ -656,11 +682,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 if self.all_layers_uni:
                     valid_token_mask, uni_mask = uni_mask, None
 
-                # only need incremental mask in first layer FIX!
-
                 # set mask to b x t x t
 
-            if self.d_cats > 0  and not self.use_vq and tau == 0:
+            if self.d_cats > 0 and not self.use_vq and tau == 0:
                 # disabling dropout to get deterministic results for analysis
                 # TODO is this step needed?
                 encoder_in = self.add_timing(extra_content_annotations)
@@ -676,16 +700,26 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 v_c = torch.einsum("btf,hfa->bhta", v_c, self.w_qkv_c)
                 v_p = torch.einsum("btf,hfa->bhta", v_p, self.w_qkv_p)
 
+                # self.w_qkv_c.to(self.output_device)
+                # self.w_qkv_p.to(self.output_device)
+
                 v_cp = torch.cat([v_c, v_p], dim=-1)
+
+                # print(pretrained_encoder_data.device)
+                # print(valid_token_mask.device)
+                # print(v_cp.device)
+                # print(encoder_in.device)
+                # print(uni_mask.device)
+
                 annotations = self.encoder(
                     pretrained_encoder_data, valid_token_mask,
-                    att_v=v_cp, in_x=encoder_in, first_layer_mask=uni_mask, tau=tau)
+                    att_v=v_cp, in_x=encoder_in, first_layer_mask=uni_mask, tau=en_tau)
                 del v_c
                 del v_p
                 del v_cp
             else:
                 annotations = self.encoder(
-                    encoder_in, valid_token_mask, first_layer_mask=uni_mask, tau=tau)
+                    encoder_in, valid_token_mask, first_layer_mask=uni_mask, tau=en_tau)
             # Rearrange the annotations to ensure that the transition to
             # fenceposts captures an even split between position and content.
             # TODO(nikita): try alternatives, such as omitting position entirely
@@ -736,10 +770,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.project_out.weight.data[:,
                                      copy_idx] = self.project_out.weight.data[:, original_idx]
 
-
     def compute_loss(self, batch, tau=1.0, en_tau=1.0):
         span_scores, tag_scores, cats, commit_loss = self.forward(
-            batch, tau, return_cat_logits=True)
+            batch, tau=tau, en_tau=en_tau, return_cat_logits=True)
 
         span_labels = batch["span_labels"].to(span_scores.device)
         span_loss = self.criterion(span_scores, span_labels)
@@ -751,7 +784,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         else:
             commit_loss = 0.0
 
-        if self.back_cycle:
+        if self.back_cycle and cats is not None:
             # print('span loss: ', span_loss.data.cpu().numpy(), end=' | ')
             if self.back_use_gold_trees:
                 if self.d_cats > 0:
@@ -890,10 +923,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 if self.use_vq:
                     lengths = np.array([len(example) for example in examples])
                 else:
-                    lengths = np.array([len(example) - 2 for example in examples])
+                    lengths = np.array(
+                        [len(example) - 2 for example in examples])
             else:
                 batch = self.pad_encoded(encoded)
-                span_scores, tag_scores, categories, _ = self.forward(batch, tau)
+                span_scores, tag_scores, categories, _ = self.forward(
+                    batch, tau)
                 lengths = batch["valid_token_mask"].sum(-1) - 2
                 lengths = lengths.to(span_scores.device)
 
@@ -916,7 +951,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 else:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=[str(cat) for cat in examples[i][1:-1]])
             return
-        
+
         categories_np = categories.cpu().numpy()
 
         for i in range(len(encoded)):
@@ -945,7 +980,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         )
                     ]
                 if return_cats and self.use_vq:
-                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories_np[i,1:example_len+1]
+                    yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories_np[i, 1:example_len + 1]
                 elif return_cats:
                     yield self.decoder.tree_from_chart(charts_np[i], leaves=leaves), categories[i]
                 else:
