@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from clusopt_core.cluster import Streamkm
+# from clusopt_core.cluster import Streamkm
 
 
 def ema_inplace(moving_avg, new, decay):
@@ -43,11 +43,11 @@ class VectorQuantize(nn.Module):
 
         self.wait_steps_remaining = wait_steps
         self.observe_steps_remaining = observe_steps
-        self.clustering_model = Streamkm(
-            coresetsize=n_embed * coreset_size_multiplier,
-            length=1500000,
-            seed=42,
-        )
+        # self.clustering_model = Streamkm(
+        #     coresetsize=n_embed * coreset_size_multiplier,
+        #     length=1500000,
+        #     seed=42,
+        # )
         self.data_chunks = []
 
     def stream_cluster(self, input, expected_num_tokens=None):
@@ -94,8 +94,10 @@ class VectorQuantize(nn.Module):
                 self.stream_cluster(input, expected_num_tokens)
             return (
                 input,
-                torch.zeros(input.shape[0], dtype=torch.long, device=input.device),
+                torch.zeros(input.shape[0],
+                            dtype=torch.long, device=input.device),
                 torch.tensor(0.0, dtype=input.dtype, device=input.device),
+                None
             )
 
         dtype = input.dtype
@@ -105,6 +107,7 @@ class VectorQuantize(nn.Module):
             - 2 * flatten @ self.embed
             + self.embed.pow(2).sum(0, keepdim=True)
         )
+
         _, embed_ind = (-dist).max(1)
         embed_onehot = F.one_hot(embed_ind, self.n_embed).type(dtype)
         embed_ind = embed_ind.view(*input.shape[:-1])
@@ -123,4 +126,4 @@ class VectorQuantize(nn.Module):
 
         loss = F.mse_loss(quantize.detach(), input) * self.commitment
         quantize = input + (quantize - input).detach()
-        return quantize, embed_ind, loss
+        return quantize, embed_ind, loss, dist

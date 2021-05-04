@@ -231,6 +231,9 @@ def run_train(args, hparams):
         )
         base_lr = hparams.learning_rate
     else:
+        trainable_parameters = list(
+            params for params in parser.parameters() if params.requires_grad)
+
         pretrained_params = set(trainable_parameters) & set(
             parser.pretrained_model.parameters())
         novel_params = set(trainable_parameters) - pretrained_params
