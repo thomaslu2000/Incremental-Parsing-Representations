@@ -88,7 +88,7 @@ class BeneparComponent:
     sentence segmentation.
     """
 
-    name = "benepar"
+    name = "benepar2"
 
     def __init__(
         self,
@@ -159,5 +159,6 @@ class BeneparComponent:
                 for i, tag_id in enumerate(parse.tags):
                     sent[i].tag_ = self._tag_from_index[tag_id]
 
-        doc._._constituent_data = constituent_data.finalize(doc, self._label_from_index)
+        doc._._constituent_data = constituent_data.finalize(
+            doc, self._label_from_index)
         return doc

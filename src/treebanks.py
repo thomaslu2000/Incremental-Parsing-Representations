@@ -78,7 +78,8 @@ def read_text(text_path):
         for line in f:
             if not line.strip() or line.startswith("#"):
                 if sent:
-                    sents.append(([w for w, sp in sent], [sp for w, sp in sent]))
+                    sents.append(
+                        ([w for w, sp in sent], [sp for w, sp in sent]))
                     sent = []
                     assert end_of_multiword == 0
                 continue
@@ -104,7 +105,8 @@ def read_text(text_path):
                             word = multiword_combined[have_up_to:]
                             sent.append((word, multiword_sp_after))
                         elif char_idxs:
-                            word = multiword_combined[have_up_to : max(char_idxs) + 1]
+                            word = multiword_combined[have_up_to: max(
+                                char_idxs) + 1]
                             sent.append((word, False))
                             have_up_to = max(char_idxs) + 1
                         else:
