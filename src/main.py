@@ -83,6 +83,7 @@ def make_hparams():
         # BERT and other pre-trained models
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
+        bpe_dropout=0.0,
         use_forced_lm=False,
         # Partitioned transformer encoder
         tag_dist='',
@@ -392,16 +393,16 @@ def run_train(args, hparams):
                     tau = 0.0
                 else:
                     tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
-
-            steps_past_warmup = (total_processed // hparams.batch_size
-                                 ) - hparams.learning_rate_warmup_steps
-            if steps_past_warmup > 0:
-                current_lr = min([g["lr"] for g in optimizer.param_groups])
-                new_vq_decay = 1.0 - (
-                    (1.0 - hparams.vq_decay) * (current_lr / base_lr))
-                if hparams.use_vq and new_vq_decay != parser.vq.decay:
-                    parser.vq.decay = new_vq_decay
-                    print("Adjusted vq decay to:", new_vq_decay)
+            if hparams.use_vq:
+                steps_past_warmup = (total_processed // hparams.batch_size
+                    ) - hparams.learning_rate_warmup_steps
+                if steps_past_warmup > 0:
+                    current_lr = min([g["lr"] for g in optimizer.param_groups])
+                    new_vq_decay = 1.0 - (
+                        (1.0 - hparams.vq_decay) * (current_lr / base_lr))
+                    if new_vq_decay != parser.vq.decay:
+                        parser.vq.decay = new_vq_decay
+                        print("Adjusted vq decay to:", new_vq_decay)
 
             batch_loss_value = 0.0
             for subbatch_size, subbatch in batch:
@@ -489,6 +490,9 @@ def run_test(args):
     model_path = args.model_path[0]
     print("Loading model from {}...".format(model_path))
     parser = parse_chart.ChartParser.from_trained(model_path)
+    if args.no_predict_tags and parser.f_tag is not None:
+        print("Removing part-of-speech tagging head...")
+        parser.f_tag = None
     if args.parallelize:
         parser.parallelize()
     elif torch.cuda.is_available():
@@ -569,6 +573,7 @@ def main():
     subparser.add_argument("--subbatch-max-tokens", type=int, default=500)
     subparser.add_argument("--parallelize", action="store_true")
     subparser.add_argument("--output-path", default="")
+    subparser.add_argument("--no-predict-tags", action="store_true")
 
     args = parser.parse_args()
     args.callback(args)

@@ -85,6 +85,20 @@ def retokenize(
     return tokenized
 
 
+def from_pretrained_with_bpe_dropout(pretrained_model_name_or_path, dropout=0.1):
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        pretrained_model_name_or_path, fast=True
+    )
+    assert tokenizer.is_fast
+    import tempfile
+    temp_dir = tempfile.TemporaryDirectory(prefix="tokenizer-")
+    files = tokenizer._tokenizer.model.save(temp_dir.name, "tokenizer")
+    tokenizer._tokenizer.model = type(tokenizer._tokenizer.model).from_file(
+        *files, dropout=dropout, unk_token=tokenizer.unk_token)
+    temp_dir.cleanup()
+    return tokenizer
+
+
 class Retokenizer:
     def __init__(self, pretrained_model_name_or_path, retain_start_stop=False):
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -101,6 +115,8 @@ class Retokenizer:
                     "pre-trained model requires a 'fast' tokenizer, which appears to not "
                     "be available for this pre-trained model type."
                 )
+        self.pretrained_model_name_or_path = pretrained_model_name_or_path
+        self.tokenizers_by_dropout = {}
         self.retain_start_stop = retain_start_stop
         self.is_t5 = "T5Tokenizer" in str(type(self.tokenizer))
         self.is_gpt2 = "GPT2Tokenizer" in str(type(self.tokenizer))
@@ -151,8 +167,14 @@ class Retokenizer:
                     "to the sequence."
                 )
 
-    def __call__(self, words, space_after, **kwargs):
-        example = retokenize(self.tokenizer, words, space_after, **kwargs)
+    def __call__(self, words, space_after, dropout=None, **kwargs):
+        if dropout:
+            if dropout not in self.tokenizers_by_dropout:
+                self.tokenizers_by_dropout[dropout] = from_pretrained_with_bpe_dropout(
+                    self.pretrained_model_name_or_path, dropout=dropout)
+            example = retokenize(self.tokenizers_by_dropout[dropout], words, space_after, **kwargs)
+        else:
+            example = retokenize(self.tokenizer, words, space_after, **kwargs)
         if self.is_t5:
             # decoder_input_ids (which are shifted wrt input_ids) will be created after
             # padding, but we adjust words_from_tokens now, in anticipation.

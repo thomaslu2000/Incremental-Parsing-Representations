@@ -34,6 +34,7 @@ To evaluate:
 ```bash
 python src/main.py test \
     --test-path "data/wsj/test_23.LDC99T42" \
+    --no-predict-tags \
     --model-path models/English_bert_large_uncased_*.pt
 ```
 
@@ -48,7 +49,7 @@ EXTRA_ARGS=
 if [ "$SPMRL_LANG" = "Arabic" ]; then
     # There are sentences in the train and dev sets that are too long for BERT.
     # Fortunately, there are no such long sentences in the test set
-    EXTRA_ARGS="--text-processing arabic --max-len-train 266 --max-len-dev 494"
+    EXTRA_ARGS="--text-processing arabic-translit --max-len-train 266 --max-len-dev 494"
 fi
 if [ "$SPMRL_LANG" = "Hebrew" ]; then
     EXTRA_ARGS="--text-processing hebrew"
@@ -71,7 +72,7 @@ echo "Language: ${SPMRL_LANG}"
 
 EXTRA_ARGS=
 if [ "$SPMRL_LANG" = "Arabic" ]; then
-    EXTRA_ARGS="--text-processing arabic"
+    EXTRA_ARGS="--text-processing arabic-translit"
 fi
 if [ "$SPMRL_LANG" = "Hebrew" ]; then
     EXTRA_ARGS="--text-processing hebrew"
@@ -80,9 +81,13 @@ fi
 python src/main.py test \
     --test-path data/spmrl/${SPMRL_LANG}.test \
     --evalb-dir EVALB_SPMRL \
+    --no-predict-tags \
     --model-path models/${SPMRL_LANG}_bert_base_multilingual_cased_*.pt \
     $EXTRA_ARGS
 ```
+
+*Note*: the Hebrew data comes in two varieties: one that uses Hebrew characters, and one that uses transliterated characters. If your copy of the treebank uses transliterated characters, use `--text-processing hebrew-translit` instead of `--text-processing hebrew`.
+
 
 ## Chinese models
 
@@ -102,5 +107,6 @@ To evaluate:
 python src/main.py test \
     --test-path "data/ctb_5.1/ctb.test" \
     --text-processing "chinese" \
+    --no-predict-tags \
     --model-path models/Chinese_bert_base_chinese_*.pt
 ```
