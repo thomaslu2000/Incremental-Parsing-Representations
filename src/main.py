@@ -582,7 +582,7 @@ def run_test_stream(args):
     for tree_num, example in enumerate(test_treebank):
         leaves = example.pos()
 
-        old_cats = [torch.LongTensor()]
+        old_cats = [torch.LongTensor().to(parser.output_device)]
         old_state = None
         old_pam = None
 
