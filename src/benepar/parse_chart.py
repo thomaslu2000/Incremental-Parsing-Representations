@@ -1,4 +1,5 @@
 import os
+import time
 
 import numpy as np
 
@@ -88,6 +89,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         self.char_encoder = None
         self.pretrained_model = None
+
         if hparams.use_chars_lstm:
             assert (
                 not hparams.use_pretrained
@@ -119,7 +121,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.use_forced_lm = hparams.use_forced_lm
             self.bpe_dropout = hparams.bpe_dropout
             d_pretrained = self.pretrained_model.config.hidden_size
-
             if hparams.use_encoder:
                 if self.d_cats > 0 and self.use_vq:
                     self.project_pretrained = nn.Linear(
@@ -372,7 +373,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             encoded = self.retokenizer(example.words, return_tensors="np")
         else:
             encoded = self.retokenizer(example.words, example.space_after,
-                dropout=(self.bpe_dropout if use_bpe_dropout else None))
+                                       dropout=(self.bpe_dropout if use_bpe_dropout else None))
 
         if example.tree is not None:
             encoded["span_labels"] = torch.tensor(
@@ -442,7 +443,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
     def encode_and_collate_subbatches(self, examples, subbatch_max_tokens):
         batch_size = len(examples)
         batch_num_tokens = sum(len(x.words) for x in examples)
-        encoded = [self.encode(example, use_bpe_dropout=True) for example in examples]
+        encoded = [self.encode(example, use_bpe_dropout=True)
+                   for example in examples]
 
         res = []
         for ids, subbatch_encoded in subbatching.split(
@@ -472,7 +474,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         self.add_timing.timing_table.shape[0] - 2,
                     )
                 )
-
             if self.char_encoder is not None:
                 assert isinstance(self.char_encoder, char_lstm.CharacterLSTM)
                 char_ids = batch["char_ids"].to(self.device)
@@ -700,16 +701,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 v_c = torch.einsum("btf,hfa->bhta", v_c, self.w_qkv_c)
                 v_p = torch.einsum("btf,hfa->bhta", v_p, self.w_qkv_p)
 
-                # self.w_qkv_c.to(self.output_device)
-                # self.w_qkv_p.to(self.output_device)
-
                 v_cp = torch.cat([v_c, v_p], dim=-1)
-
-                # print(pretrained_encoder_data.device)
-                # print(valid_token_mask.device)
-                # print(v_cp.device)
-                # print(encoder_in.device)
-                # print(uni_mask.device)
 
                 annotations = self.encoder(
                     pretrained_encoder_data, valid_token_mask,

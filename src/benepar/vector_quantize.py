@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from clusopt_core.cluster import Streamkm
+# from clusopt_core.cluster import Streamkm
 
 
 def ema_inplace(moving_avg, new, decay):

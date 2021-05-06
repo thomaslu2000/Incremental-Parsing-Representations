@@ -14,6 +14,8 @@ from benepar import char_lstm
 from benepar import decode_chart
 from benepar import nkutil
 from benepar import parse_chart
+from benepar import InputSentence
+from benepar.parse_base import BaseInputExample
 import evaluate
 import learning_rates
 import treebanks
@@ -83,7 +85,7 @@ def make_hparams():
         # BERT and other pre-trained models
         use_pretrained=False,
         pretrained_model="bert-base-uncased",
-        bpe_dropout=0.0,
+        bpe_dropout=0.2,
         use_forced_lm=False,
         # Partitioned transformer encoder
         tag_dist='',
@@ -276,6 +278,9 @@ def run_train(args, hparams):
 
     start_time = time.time()
 
+    all_dists = []
+    all_dev_accs = []
+
     def check_dev():
         nonlocal best_dev_fscore
         nonlocal best_dev_model_path
@@ -288,11 +293,8 @@ def run_train(args, hparams):
             subbatch_max_tokens=args.subbatch_max_tokens,
             tau=0.0,
             en_tau=0.0,
-            return_cats=hparams.discrete_cats != 0,
-            return_encoded=hparams.tag_dist
+            return_cats=hparams.discrete_cats != 0
         )
-        if hparams.tag_dist:
-            dev_predicted_and_cats, encoded = dev_predicted_and_cats
 
         if hparams.discrete_cats == 0:
             dev_predicted = dev_predicted_and_cats
@@ -324,11 +326,15 @@ def run_train(args, hparams):
             )
         )
 
-        if dev_fscore.fscore > best_dev_fscore:
+        if hparams.tag_dist:
+            all_dists.append(dist)
+            # all_dev_accs.append(dev_fscore.fscore)
+            # to_save = np.hstack(
+            #     [np.array(all_dev_accs).reshape((-1, 1)), np.array(all_dists)])
+            with open(hparams.tag_dist, 'wb') as f:
+                np.save(f, np.vstack(all_dists))
 
-            # if hparams.tag_dist:
-            #     with open(hparams.tag_dist, 'wb') as f:
-            #         np.save(f, tag_distribution)
+        if dev_fscore.fscore > best_dev_fscore:
 
             if best_dev_model_path is not None:
                 extensions = [".pt"]
@@ -371,7 +377,7 @@ def run_train(args, hparams):
     tag_combine_start = hparams.tag_combine_start
     iteration = 0
 
-    # dist = check_dev()
+    dist = check_dev()
 
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
@@ -395,7 +401,7 @@ def run_train(args, hparams):
                     tau = max(0.0, 1.0 - step / hparams.vq_interpolate_steps)
             if hparams.use_vq:
                 steps_past_warmup = (total_processed // hparams.batch_size
-                    ) - hparams.learning_rate_warmup_steps
+                                     ) - hparams.learning_rate_warmup_steps
                 if steps_past_warmup > 0:
                     current_lr = min([g["lr"] for g in optimizer.param_groups])
                     new_vq_decay = 1.0 - (
@@ -540,6 +546,169 @@ def run_test(args):
     )
 
 
+def run_test_stream(args):
+    print("Loading test trees from {}...".format(args.test_path))
+    test_treebank = treebanks.load_trees(
+        args.test_path, args.test_path_text, args.text_processing
+    )
+    print("Loaded {:,} test examples.".format(len(test_treebank)))
+
+    if len(args.model_path) != 1:
+        raise NotImplementedError(
+            "Ensembling multiple parsers is not "
+            "implemented in this version of the code."
+        )
+
+    model_path = args.model_path[0]
+    print("Loading model from {}...".format(model_path))
+    parser = parse_chart.ChartParser.from_trained(model_path)
+    if args.no_predict_tags and parser.f_tag is not None:
+        print("Removing part-of-speech tagging head...")
+        parser.f_tag = None
+
+    if args.parallelize:
+        parser.parallelize()
+    elif torch.cuda.is_available():
+        parser.cuda()
+
+    parser.eval()
+    print('Starting Sentences')
+    # words is  a list of words, look in encode
+
+    state_names = {'batch': 0, 'forward': 1,
+                   'decode': 2, 'inc_setup': 3, 'token_to_cat': 4, -1: -1}
+    tree_inds, times, states = [], [], []
+
+    for tree_num, example in enumerate(test_treebank):
+        leaves = example.pos()
+
+        old_cats = [torch.LongTensor()]
+        old_state = None
+        old_pam = None
+
+        for i in range(1, len(example.words) + 1):
+            start_time = time.time()
+
+            def log_state(state=-1):
+                tree_inds.append(tree_num)
+                times.append(time.time() - start_time)
+                states.append(state_names[state])
+
+            if args.incremental:
+                # get next input
+                if parser.char_encoder is not None:
+                    encoded = parser.retokenizer(
+                        example.words[i - 1:i], return_tensors="np")
+                else:
+                    encoded = parser.retokenizer(
+                        example.words[i - 1:i], example.space_after[i - 1:i], dropout=(None))
+                batch = parser.retokenizer.pad(
+                    [{
+                        k: v
+                        for k, v in encoded.items()
+                    }],
+                    return_tensors="pt",
+                )
+
+                log_state('batch')
+
+                input_ids = batch["input_ids"].to(parser.device)
+                words_from_tokens = batch["words_from_tokens"].to(
+                    parser.output_device)
+
+                pretrained_attention_mask = batch["attention_mask"].to(
+                    parser.device)
+                if old_pam is not None:
+                    pretrained_attention_mask = torch.hstack(
+                        (old_pam, pretrained_attention_mask))
+                old_pam = pretrained_attention_mask
+                valid_token_mask = batch["valid_token_mask"].to(
+                    parser.output_device)
+
+                extra_kwargs = {}
+                if "token_type_ids" in batch:
+                    extra_kwargs["token_type_ids"] = batch["token_type_ids"].to(
+                        parser.device)
+                if "decoder_input_ids" in batch:
+                    extra_kwargs["decoder_input_ids"] = batch["decoder_input_ids"].to(
+                        parser.device
+                    )
+                    extra_kwargs["decoder_attention_mask"] = batch[
+                        "decoder_attention_mask"
+                    ].to(parser.device)
+
+                log_state('inc_setup')
+
+                pretrained_out = parser.pretrained_model(
+                    input_ids, attention_mask=pretrained_attention_mask, return_dict=True,
+                    use_cache=True, past_key_values=old_state, **extra_kwargs
+                )
+                features = pretrained_out.last_hidden_state.to(
+                    parser.output_device) / parser.pretrained_divide
+                old_state = pretrained_out.past_key_values
+
+                features = features[
+                    torch.arange(features.shape[0])[:, None],
+                    F.relu(words_from_tokens),
+                ]
+
+                features.masked_fill_(~valid_token_mask[:, :, None], 0)
+
+                quantization_mask = valid_token_mask.clone()
+                quantization_mask[:, 0] = False
+                quantization_mask[
+                    torch.arange(features.shape[0]),
+                    valid_token_mask.sum(1) - 1,
+                ] = False
+
+                projected_features = parser.project_pretrained(features)
+                unquantized_features = projected_features[quantization_mask]
+                (quantized_features, categories, commit_loss, dist) = parser.vq(
+                    unquantized_features,
+                    batch["batch_num_tokens"] if "batch_num_tokens" in batch else None
+                )
+                old_cats[0] = torch.hstack((old_cats[0], categories))
+                log_state('token_to_cat')
+
+                span_scores, tag_scores, categories, _ = parser.forward(
+                    None, 0.0, 0.0, force_cats=old_cats)
+                log_state('forward')
+                lengths = torch.LongTensor([old_cats[0].shape[0]])
+            else:
+                if parser.char_encoder is not None:
+                    encoded = parser.retokenizer(
+                        example.words[:i], return_tensors="np")
+                else:
+                    encoded = parser.retokenizer(
+                        example.words[:i], example.space_after[:i], dropout=(None))
+                batch = parser.retokenizer.pad(
+                    [{
+                        k: v
+                        for k, v in encoded.items()
+                    }],
+                    return_tensors="pt",
+                )
+                log_state('batch')
+                span_scores, tag_scores, categories, _ = parser.forward(
+                    batch, 0.0)
+                log_state('forward')
+                lengths = batch["valid_token_mask"].sum(-1) - 2
+
+            lengths = lengths.to(span_scores.device)
+
+            charts_np = parser.decoder.charts_from_pytorch_scores_batched(
+                span_scores, lengths
+            )
+            _ = parser.decoder.tree_from_chart(
+                charts_np[0], leaves=leaves[:i])
+            log_state('decode')
+    data = [tree_inds, times, states]
+    data = np.array(data).T
+    with open(args.output_path, 'wb') as f:
+        np.save(f, data)
+    print('saved')
+
+
 def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
     parser = argparse.ArgumentParser()
@@ -574,6 +743,19 @@ def main():
     subparser.add_argument("--parallelize", action="store_true")
     subparser.add_argument("--output-path", default="")
     subparser.add_argument("--no-predict-tags", action="store_true")
+
+    subparser = subparsers.add_parser("stream")
+    subparser.set_defaults(callback=run_test_stream)
+    subparser.add_argument("--model-path", nargs="+", required=True)
+    subparser.add_argument("--test-path", default="data/wsj/test_23.LDC99T42")
+    subparser.add_argument("--test-path-text", type=str)
+    subparser.add_argument("--test-path-raw", type=str)
+    subparser.add_argument("--text-processing", default="default")
+    subparser.add_argument("--subbatch-max-tokens", type=int, default=500)
+    subparser.add_argument("--parallelize", action="store_true")
+    subparser.add_argument("--output-path", default="logs/stream_times.npy")
+    subparser.add_argument("--no-predict-tags", action="store_true")
+    subparser.add_argument("--incremental", action="store_true")
 
     args = parser.parse_args()
     args.callback(args)
