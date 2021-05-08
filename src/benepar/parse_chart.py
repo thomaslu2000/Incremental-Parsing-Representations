@@ -46,19 +46,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.char_vocab = char_vocab
 
         self.d_model = hparams.d_model
-        try:
-            self.tree_transform = hparams.tree_transform
-        except:
-            self.tree_transform = None
-        try:
-            self.pretrained_divide = hparams.pretrained_divide
-        except:
-            self.pretrained_divide = 1.0
+        self.pretrained_divide = hparams.pretrained_divide
 
-        try:
-            self.two_label_subspan = hparams.two_label_subspan
-        except:
-            self.two_label_subspan = None
+        self.two_label_subspan = hparams.two_label_subspan
         try:
             self.uni = hparams.uni
         except:
@@ -80,15 +70,41 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         except:
             self.tags_per_word = 1
 
-        try:
-            self.mask = hparams.mask
-        except:
-            self.set_mask(tuple(False for _ in range(self.d_cats)))
+        self.mask = hparams.mask
 
         self.back_cycle = None
 
         self.char_encoder = None
         self.pretrained_model = None
+
+        word_vec_loc = '/global/scratch/tlu2000/dev/word_vecs/'
+
+        try:
+            if 'GoogleNews-vectors-negative300.bin' in hparams.use_clustered_lexicon:
+                from gensim.models import KeyedVectors
+                print('Using Word2Vec')
+                clustered_lexicon = KeyedVectors.load_word2vec_format(
+                    word_vec_loc + hparams.use_clustered_lexicon)
+
+                def get_vec(x):
+                    if x in clustered_lexicon:
+                        return clustered_lexicon[x]
+                    return clustered_lexicon['Smith']
+                self.clustered_lexicon = get_vec
+                print('Loaded Lexicon')
+
+            elif hparams.use_clustered_lexicon:
+                print('Using FastText')
+                from gensim.models.fasttext import load_facebook_model
+                clustered_lexicon = load_facebook_model(
+                    word_vec_loc + hparams.use_clustered_lexicon)
+                self.clustered_lexicon = lambda x: clustered_lexicon.wv[x]
+                print('Loaded Lexicon')
+            else:
+                self.clustered_lexicon = None
+
+        except:
+            self.clustered_lexicon = None
 
         if hparams.use_chars_lstm:
             assert (
@@ -375,6 +391,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             encoded = self.retokenizer(example.words, example.space_after,
                                        dropout=(self.bpe_dropout if use_bpe_dropout else None))
 
+        if self.clustered_lexicon:
+            encoded['wv'] = torch.FloatTensor(
+                [self.clustered_lexicon(x) for x in example.words])
+
         if example.tree is not None:
             encoded["span_labels"] = torch.tensor(
                 self.decoder.chart_from_tree(example.tree)
@@ -536,6 +556,14 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                         projected_features = self.project_pretrained(features)
                         unquantized_features = projected_features[quantization_mask]
+                        if self.hparams.use_clustered_lexicon:
+                            assert 'wv' in batch, 'no word vectors detected'
+                            # overwriting pretrained model
+                            if np.random.random() < 0.01:
+                                print('Using WV')
+                            unquantized_features = batch['wv'].to(
+                                self.output_device)
+
                         (quantized_features, categories, commit_loss, dist) = self.vq(
                             unquantized_features,
                             batch["batch_num_tokens"] if "batch_num_tokens" in batch else None
@@ -617,7 +645,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         else:
                             category_ret = cats  # .reshape(b, w, d)
 
-                        #cats = cats.reshape(b, w, d)
+                        # cats = cats.reshape(b, w, d)
 
                         extra_content_annotations = self.project_out(cats)
                     else:

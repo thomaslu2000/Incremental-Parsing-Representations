@@ -78,6 +78,8 @@ def make_hparams():
         step_decay_factor=0.5,
         step_decay_patience=5,
         max_consecutive_decays=3,  # establishes a termination criterion
+        # Clustered Lexicon
+        use_clustered_lexicon='',
         # CharLSTM
         use_chars_lstm=False,
         d_char_emb=64,
@@ -547,6 +549,7 @@ def run_test(args):
 
 
 def run_test_stream(args):
+    assert False, 'In Development'
     print("Loading test trees from {}...".format(args.test_path))
     test_treebank = treebanks.load_trees(
         args.test_path, args.test_path_text, args.text_processing
@@ -577,7 +580,7 @@ def run_test_stream(args):
 
     state_names = {'batch': 0, 'forward': 1,
                    'decode': 2, 'inc_setup': 3, 'token_to_cat': 4, -1: -1}
-    tree_inds, times, states = [], [], []
+    tree_inds, times, states, lengths = [], [], [], []
 
     for tree_num, example in enumerate(test_treebank):
         leaves = example.pos()
@@ -593,6 +596,7 @@ def run_test_stream(args):
                 tree_inds.append(tree_num)
                 times.append(time.time() - start_time)
                 states.append(state_names[state])
+                lengths.append(i)
 
             if args.incremental:
                 # get next input
@@ -702,7 +706,7 @@ def run_test_stream(args):
             _ = parser.decoder.tree_from_chart(
                 charts_np[0], leaves=leaves[:i])
             log_state('decode')
-    data = [tree_inds, times, states]
+    data = [tree_inds, times, states, lengths]
     data = np.array(data).T
     with open(args.output_path, 'wb') as f:
         np.save(f, data)
