@@ -556,11 +556,11 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                         projected_features = self.project_pretrained(features)
                         unquantized_features = projected_features[quantization_mask]
-                        if self.hparams.use_clustered_lexicon:
-                            assert 'wv' in batch, 'no word vectors detected'
+                        if 'wv' in batch:
                             # overwriting pretrained model
                             if np.random.random() < 0.01:
                                 print('Using WV')
+                            assert unquantized_features.shape == batch['wv'].shape
                             unquantized_features = batch['wv'].to(
                                 self.output_device)
 
