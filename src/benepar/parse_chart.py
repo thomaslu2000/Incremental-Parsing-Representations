@@ -70,7 +70,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         except:
             self.tags_per_word = 1
 
-        self.mask = hparams.mask
+        try:
+            self.mask = hparams.mask
+        except:
+            self.mask = (False for _ in range(self.d_cats))
 
         self.back_cycle = None
 
@@ -137,13 +140,15 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.use_forced_lm = hparams.use_forced_lm
             self.bpe_dropout = hparams.bpe_dropout
             d_pretrained = self.pretrained_model.config.hidden_size
+            if self.clustered_lexicon:
+                d_pretrained = 300
             if hparams.use_encoder:
                 if self.d_cats > 0 and self.use_vq:
                     self.project_pretrained = nn.Linear(
                         d_pretrained, hparams.d_model // 2, bias=False
                     )
                     self.vq = vector_quantize.VectorQuantize(
-                        dim=hparams.d_model // 2,
+                        dim=hparams.d_model // 2 if not self.clustered_lexicon else 300,
                         n_embed=self.d_cats,
                         decay=hparams.vq_decay,
                         commitment=hparams.vq_commitment,
@@ -392,8 +397,13 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                                        dropout=(self.bpe_dropout if use_bpe_dropout else None))
 
         if self.clustered_lexicon:
-            encoded['wv'] = torch.FloatTensor(
-                [self.clustered_lexicon(x) for x in example.words])
+            wvs = [self.clustered_lexicon('X').copy()] + \
+                [self.clustered_lexicon(
+                    x).copy() for x in example.words] + [self.clustered_lexicon('X').copy()]
+            encoded['wv'] = torch.FloatTensor(wvs)
+            encoded['wv_mask'] = torch.ones(
+                len(wvs), dtype=torch.bool)
+            encoded['wv_mask'][[0, -1]] = False
 
         if example.tree is not None:
             encoded["span_labels"] = torch.tensor(
@@ -421,7 +431,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 {
                     k: v
                     for k, v in example.items()
-                    if (k not in ["span_labels", "tag_labels", "tetra_tags", "tetra_tags_mask", "tetra_padding_mask"])
+                    if (k not in ["span_labels", "tag_labels", "tetra_tags",
+                                  "tetra_tags_mask", "tetra_padding_mask", 'wv', 'wv_mask'])
                 }
                 for example in encoded_batch
             ],
@@ -436,6 +447,16 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 [example["tag_labels"] for example in encoded_batch],
                 batch_first=True,
                 padding_value=-100,
+            )
+        if encoded_batch and "wv" in encoded_batch[0]:
+            batch["wv"] = nn.utils.rnn.pad_sequence(
+                [example["wv"] for example in encoded_batch],
+                batch_first=True
+            )
+        if encoded_batch and "wv_mask" in encoded_batch[0]:
+            batch["wv_mask"] = nn.utils.rnn.pad_sequence(
+                [example["wv_mask"] for example in encoded_batch],
+                batch_first=True
             )
         if encoded_batch and "tetra_tags" in encoded_batch[0]:
             batch["tetra_tags"] = nn.utils.rnn.pad_sequence(
@@ -500,42 +521,52 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 extra_content_annotations = self.char_encoder(
                     char_ids, valid_token_mask)
             elif self.pretrained_model is not None:
-                input_ids = batch["input_ids"].to(self.device)
-                words_from_tokens = batch["words_from_tokens"].to(
-                    self.output_device)
-                pretrained_attention_mask = batch["attention_mask"].to(
-                    self.device)
-
-                extra_kwargs = {}
-                if "token_type_ids" in batch:
-                    extra_kwargs["token_type_ids"] = batch["token_type_ids"].to(
-                        self.device)
-                if "decoder_input_ids" in batch:
-                    extra_kwargs["decoder_input_ids"] = batch["decoder_input_ids"].to(
-                        self.device
-                    )
-                    extra_kwargs["decoder_attention_mask"] = batch[
-                        "decoder_attention_mask"
-                    ].to(self.device)
-                if self.retokenizer.is_t5 and self.use_forced_lm:
-                    pretrained_out = self.pretrained_model(
-                        input_ids=input_ids[:, :1],
-                        attention_mask=pretrained_attention_mask[:, :1],
-                        return_dict=True,
-                        **extra_kwargs
-                    )
+                if 'wv' in batch:
+                    # using clustered lexicon
+                    print('Using Word Vectors')
+                    features = batch['wv'].to(
+                        self.output_device)
+                    valid_token_mask = batch['wv_mask'].to(
+                        self.output_device)
                 else:
-                    pretrained_out = self.pretrained_model(
-                        input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
-                    )
-                features = pretrained_out.last_hidden_state.to(
-                    self.output_device) / self.pretrained_divide
-                features = features[
-                    torch.arange(features.shape[0])[:, None],
-                    # Note that words_from_tokens uses index -100 for invalid positions
-                    F.relu(words_from_tokens),
-                ]
+                    input_ids = batch["input_ids"].to(self.device)
+                    words_from_tokens = batch["words_from_tokens"].to(
+                        self.output_device)
+                    pretrained_attention_mask = batch["attention_mask"].to(
+                        self.device)
+
+                    extra_kwargs = {}
+                    if "token_type_ids" in batch:
+                        extra_kwargs["token_type_ids"] = batch["token_type_ids"].to(
+                            self.device)
+                    if "decoder_input_ids" in batch:
+                        extra_kwargs["decoder_input_ids"] = batch["decoder_input_ids"].to(
+                            self.device
+                        )
+                        extra_kwargs["decoder_attention_mask"] = batch[
+                            "decoder_attention_mask"
+                        ].to(self.device)
+                    if self.retokenizer.is_t5 and self.use_forced_lm:
+                        pretrained_out = self.pretrained_model(
+                            input_ids=input_ids[:, :1],
+                            attention_mask=pretrained_attention_mask[:, :1],
+                            return_dict=True,
+                            **extra_kwargs
+                        )
+                    else:
+                        pretrained_out = self.pretrained_model(
+                            input_ids, attention_mask=pretrained_attention_mask, return_dict=True, **extra_kwargs
+                        )
+                    features = pretrained_out.last_hidden_state.to(
+                        self.output_device) / self.pretrained_divide
+                    features = features[
+                        torch.arange(features.shape[0])[:, None],
+                        # Note that words_from_tokens uses index -100 for invalid positions
+                        F.relu(words_from_tokens),
+                    ]
+
                 features.masked_fill_(~valid_token_mask[:, :, None], 0)
+
                 if self.encoder is not None:
                     if self.d_cats > 0 and self.use_vq:
                         # Create a mask that excludes start and stop tokens.
@@ -556,13 +587,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                         projected_features = self.project_pretrained(features)
                         unquantized_features = projected_features[quantization_mask]
-                        if 'wv' in batch:
-                            # overwriting pretrained model
-                            if np.random.random() < 0.01:
-                                print('Using WV')
-                            assert unquantized_features.shape == batch['wv'].shape
-                            unquantized_features = batch['wv'].to(
-                                self.output_device)
 
                         (quantized_features, categories, commit_loss, dist) = self.vq(
                             unquantized_features,
@@ -883,53 +907,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         # for later -- use this as a prior for inference
         if np.random.random() < 0.001:
             print('back loss: ', loss.data.cpu().numpy())
-
-        return self.back_loss_constant * loss
-
-    def predicted_tetra_to_tags(self, batch, cats, span_scores):
-        assert False, 'using gold trees for now'
-        assert self.back_cycle is not None and not self.back_use_gold_trees
-
-        lengths = batch["valid_token_mask"].sum(-1) - 2
-        lengths = lengths.to(span_scores.device)
-        charts_np = self.decoder.charts_from_pytorch_scores_batched(
-            span_scores, lengths
-        )
-        tetra_tags = []
-        tetra_tags_mask = []
-        for i in range(len(lengths)):
-            tree = self.decoder.tree_from_chart(
-                charts_np[i], leaves=[('S', str(i)) for i in range(lengths[i])])
-            tree = self.tree_transform(tree)
-            tets = [len(self.tetra_tag_system.tag_vocab)] + self.tetra_tag_system.ids_from_tree(
-                tree) + [len(self.tetra_tag_system.tag_vocab)]
-            tetra_tags.append(torch.Tensor(tets))
-            mask = [i in self.tetra_leaves for i in tets]
-            mask[0] = mask[-1] = True
-            tetra_tags_mask.append(torch.Tensor(mask).bool())
-
-        tetra_tags = nn.utils.rnn.pad_sequence(
-            tetra_tags,
-            batch_first=True,
-            padding_value=len(self.tetra_tag_system.tag_vocab)
-        ).long()
-
-        tetra_tags_mask = nn.utils.rnn.pad_sequence(
-            tetra_tags_mask,
-            batch_first=True
-        )
-
-        # tree to tags
-        encoder_in = F.one_hot(tetra_tags.to(self.device), num_classes=len(
-            self.tetra_tag_system.tag_vocab) + 1).float()
-        encoder_in = self.back_project(encoder_in)
-        encoder_in = self.add_timing(self.morpho_emb_dropout(encoder_in))
-        annotations = self.back_cycle(encoder_in, None)
-        logits = self.f_back(annotations)
-        loss = self.back_criterion(
-            logits[tetra_tags_mask.to(self.device)], cats[batch["valid_token_mask"].to(self.device)])
-
-        print('back loss: ', loss.data.cpu().numpy())
 
         return self.back_loss_constant * loss
 
