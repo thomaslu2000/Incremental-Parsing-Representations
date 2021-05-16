@@ -122,24 +122,26 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 # partitioned positional encoding
                 char_dropout=hparams.char_lstm_input_dropout,
             )
-        elif hparams.use_pretrained:
-            if pretrained_model_path is None:
-                self.retokenizer = retokenization.Retokenizer(
-                    hparams.pretrained_model, retain_start_stop=True
-                )
-                self.pretrained_model = AutoModel.from_pretrained(
-                    hparams.pretrained_model
-                )
-            else:
-                self.retokenizer = retokenization.Retokenizer(
-                    pretrained_model_path, retain_start_stop=True
-                )
-                self.pretrained_model = AutoModel.from_config(
-                    AutoConfig.from_pretrained(pretrained_model_path)
-                )
+        elif hparams.use_pretrained or self.clustered_lexicon:
+            if hparams.use_pretrained:
+                if pretrained_model_path is None:
+                    self.retokenizer = retokenization.Retokenizer(
+                        hparams.pretrained_model, retain_start_stop=True
+                    )
+                    self.pretrained_model = AutoModel.from_pretrained(
+                        hparams.pretrained_model
+                    )
+                else:
+                    self.retokenizer = retokenization.Retokenizer(
+                        pretrained_model_path, retain_start_stop=True
+                    )
+                    self.pretrained_model = AutoModel.from_config(
+                        AutoConfig.from_pretrained(pretrained_model_path)
+                    )
+                d_pretrained = self.pretrained_model.config.hidden_size
             self.use_forced_lm = hparams.use_forced_lm
             self.bpe_dropout = hparams.bpe_dropout
-            d_pretrained = self.pretrained_model.config.hidden_size
+
             if self.clustered_lexicon:
                 d_pretrained = 300
             if hparams.use_encoder:
@@ -520,7 +522,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 char_ids = batch["char_ids"].to(self.device)
                 extra_content_annotations = self.char_encoder(
                     char_ids, valid_token_mask)
-            elif self.pretrained_model is not None:
+            elif self.pretrained_model is not None or 'wv' in batch:
                 if 'wv' in batch:
                     # using clustered lexicon
                     print('Using Word Vectors')
