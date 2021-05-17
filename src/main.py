@@ -242,8 +242,11 @@ def run_train(args, hparams):
         trainable_parameters = list(
             params for params in parser.parameters() if params.requires_grad)
 
-        pretrained_params = set(trainable_parameters) & set(
-            parser.pretrained_model.parameters())
+        pretrained_param_set = set(
+            parser.pretrained_model.parameters()) if parser.pretrained_model else set([])
+
+        pretrained_params = set(trainable_parameters) & pretrained_param_set
+        del pretrained_param_set
         novel_params = set(trainable_parameters) - pretrained_params
         grouped_trainable_parameters = [
             {
