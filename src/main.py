@@ -216,8 +216,11 @@ def run_train(args, hparams):
 
     print("Initializing optimizer...")
 
-    pretrained_weights = list(
-        params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    if parser.pretrained_model:
+        pretrained_weights = list(
+            params for params in parser.pretrained_model.parameters() if params.requires_grad)
+    else:
+        pretrained_weights = []
     other_weights = []
     for p in parser.parameters():
         if p.requires_grad and all(p is not p2 for p2 in pretrained_weights):
