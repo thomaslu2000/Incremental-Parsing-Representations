@@ -531,6 +531,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     valid_token_mask = batch['wv_mask'].to(
                         self.output_device)
                 else:
+                    assert not self.clustered_lexicon
                     input_ids = batch["input_ids"].to(self.device)
                     words_from_tokens = batch["words_from_tokens"].to(
                         self.output_device)
@@ -566,6 +567,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         # Note that words_from_tokens uses index -100 for invalid positions
                         F.relu(words_from_tokens),
                     ]
+                    assert not self.clustered_lexicon
 
                 features.masked_fill_(~valid_token_mask[:, :, None], 0)
 
