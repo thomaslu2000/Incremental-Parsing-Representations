@@ -82,34 +82,35 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         word_vec_loc = '/global/scratch/tlu2000/dev/word_vecs/'
 
-        try:
-            if 'GoogleNews-vectors-negative300.bin' in hparams.use_clustered_lexicon:
-                from gensim.models import KeyedVectors
-                print('Using Word2Vec')
-                clustered_lexicon = KeyedVectors.load_word2vec_format(
-                    word_vec_loc + hparams.use_clustered_lexicon)
+        # try:
+        if 'GoogleNews-vectors-negative300.bin' in hparams.use_clustered_lexicon:
+            from gensim.models import KeyedVectors
+            print('Using Word2Vec')
+            clustered_lexicon = KeyedVectors.load_word2vec_format(
+                word_vec_loc + hparams.use_clustered_lexicon)
 
-                def get_vec(x):
-                    if x in clustered_lexicon:
-                        return clustered_lexicon[x]
-                    return clustered_lexicon['Smith']
-                self.clustered_lexicon = True
-                self.get_vec = get_vec
-                print('Loaded Lexicon')
+            def get_vec(x):
+                if x in clustered_lexicon:
+                    return clustered_lexicon[x]
+                return clustered_lexicon['Smith']
+            self.clustered_lexicon = True
+            self.get_vec = get_vec
+            print('Loaded Lexicon')
 
-            elif hparams.use_clustered_lexicon:
-                print('Using FastText')
-                from gensim.models.fasttext import load_facebook_model
-                clustered_lexicon = load_facebook_model(
-                    word_vec_loc + hparams.use_clustered_lexicon)
-                self.clustered_lexicon = True
-                self.get_vec = lambda x: clustered_lexicon.wv[x]
-                print('Loaded Lexicon')
-            else:
-                self.clustered_lexicon = None
-
-        except:
+        elif hparams.use_clustered_lexicon:
+            print('Using FastText')
+            from gensim.models.fasttext import load_facebook_model
+            clustered_lexicon = load_facebook_model(
+                word_vec_loc + hparams.use_clustered_lexicon)
+            self.clustered_lexicon = True
+            self.get_vec = lambda x: clustered_lexicon.wv[x]
+            print('Loaded Lexicon')
+        else:
             self.clustered_lexicon = None
+
+        # except:
+        #     print('Error loading Lexicon')
+        #     self.clustered_lexicon = None
 
         if hparams.use_chars_lstm:
             assert (
