@@ -93,8 +93,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 if x in clustered_lexicon:
                     return clustered_lexicon[x]
                 return clustered_lexicon['Smith']
-            self.clustered_lexicon = True
-            self.get_vec = get_vec
+            self.clustered_lexicon = get_vec
             print('Loaded Lexicon')
 
         elif hparams.use_clustered_lexicon:
@@ -102,8 +101,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             from gensim.models.fasttext import load_facebook_model
             clustered_lexicon = load_facebook_model(
                 word_vec_loc + hparams.use_clustered_lexicon)
-            self.clustered_lexicon = True
-            self.get_vec = lambda x: clustered_lexicon.wv[x]
+            self.clustered_lexicon = lambda x: clustered_lexicon.wv[x]
             print('Loaded Lexicon')
         else:
             self.clustered_lexicon = None
