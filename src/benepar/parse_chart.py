@@ -93,7 +93,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                     if x in clustered_lexicon:
                         return clustered_lexicon[x]
                     return clustered_lexicon['Smith']
-                self.clustered_lexicon = get_vec
+                self.clustered_lexicon = True
+                self.get_vec = get_vec
                 print('Loaded Lexicon')
 
             elif hparams.use_clustered_lexicon:
@@ -101,7 +102,8 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                 from gensim.models.fasttext import load_facebook_model
                 clustered_lexicon = load_facebook_model(
                     word_vec_loc + hparams.use_clustered_lexicon)
-                self.clustered_lexicon = lambda x: clustered_lexicon.wv[x]
+                self.clustered_lexicon = True
+                self.get_vec = lambda x: clustered_lexicon.wv[x]
                 print('Loaded Lexicon')
             else:
                 self.clustered_lexicon = None
@@ -532,6 +534,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         self.output_device)
                 else:
                     assert not self.clustered_lexicon
+                    print('Using pretrained')
                     input_ids = batch["input_ids"].to(self.device)
                     words_from_tokens = batch["words_from_tokens"].to(
                         self.output_device)
@@ -567,6 +570,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                         # Note that words_from_tokens uses index -100 for invalid positions
                         F.relu(words_from_tokens),
                     ]
+                    # print('Using Features', features)
                     assert not self.clustered_lexicon
 
                 features.masked_fill_(~valid_token_mask[:, :, None], 0)
