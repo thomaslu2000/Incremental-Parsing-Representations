@@ -379,7 +379,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         config["hparams"] = nkutil.HParams(**hparams)
         parser = cls(**config)
-        parser.load_state_dict(state_dict)
+        parser.load_state_dict(state_dict, strict=False)
 
         if hasattr(parser, 'vq'):
             # HACK: Skip vq initialization when restoring from checkpoint.
@@ -526,14 +526,12 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             elif self.pretrained_model is not None or 'wv' in batch:
                 if 'wv' in batch:
                     # using clustered lexicon
-                    print('Using Word Vectors')
                     features = batch['wv'].to(
                         self.output_device)
                     valid_token_mask = batch['wv_mask'].to(
                         self.output_device)
                 else:
                     assert not self.clustered_lexicon
-                    print('Using pretrained')
                     input_ids = batch["input_ids"].to(self.device)
                     words_from_tokens = batch["words_from_tokens"].to(
                         self.output_device)
