@@ -390,10 +390,6 @@ def run_train(args, hparams):
     for epoch in itertools.count(start=1):
         epoch_start_time = time.time()
 
-        if hparams.use_vq and epoch == 3:
-            # if using vq, save a model from epoch 3+
-            best_dev_fscore = -np.inf
-
         for batch_num, batch in enumerate(data_loader, start=1):
             iteration += 1
             optimizer.zero_grad()
@@ -462,7 +458,9 @@ def run_train(args, hparams):
 
             if current_processed >= check_every:
                 current_processed -= check_every
-                dist = check_dev()
+                if not hparams.use_vq or epoch > 2:
+                    # fix bug saving models that dont use vq
+                    dist = check_dev()
                 scheduler.step(metrics=best_dev_fscore)
 
                 if (hparams.discrete_cats > 0 and hparams.use_vq):
