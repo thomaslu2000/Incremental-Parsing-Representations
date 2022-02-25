@@ -37,17 +37,17 @@ class VectorQuantize(nn.Module):
         self.commitment = commitment
 
         embed = torch.randn(dim, n_embed)
-        self.register_buffer("embed", embed)
+        self.register_buffer("embed", nn.Parameter(embed))
         self.register_buffer("cluster_size", torch.zeros(n_embed))
-        self.register_buffer("embed_avg", embed.clone())
+        self.register_buffer("embed_avg", nn.Parameter(embed.clone()))
 
         self.wait_steps_remaining = wait_steps
         self.observe_steps_remaining = observe_steps
-        self.clustering_model = Streamkm(
-            coresetsize=n_embed * coreset_size_multiplier,
-            length=1500000,
-            seed=42,
-        )
+        # self.clustering_model = Streamkm(
+        #     coresetsize=n_embed * coreset_size_multiplier,
+        #     length=1500000,
+        #     seed=42,
+        # )
         self.data_chunks = []
 
     def stream_cluster(self, input, expected_num_tokens=None):
@@ -107,7 +107,6 @@ class VectorQuantize(nn.Module):
             - 2 * flatten @ self.embed
             + self.embed.pow(2).sum(0, keepdim=True)
         )
-
         _, embed_ind = (-dist).max(1)
         embed_onehot = F.one_hot(embed_ind, self.n_embed).type(dtype)
         embed_ind = embed_ind.view(*input.shape[:-1])

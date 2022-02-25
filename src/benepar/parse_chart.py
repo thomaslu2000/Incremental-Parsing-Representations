@@ -80,7 +80,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.char_encoder = None
         self.pretrained_model = None
 
-        word_vec_loc = '/global/scratch/tlu2000/dev/word_vecs/'
+        word_vec_loc = '/global/scratch/users/tlu2000/dev/word_vecs/'
 
         # try:
         if 'GoogleNews-vectors-negative300.bin' in hparams.use_clustered_lexicon:
@@ -92,7 +92,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             def get_vec(x):
                 if x in clustered_lexicon:
                     return clustered_lexicon[x]
-                return clustered_lexicon['Smith']
+                return clustered_lexicon['UNK']
             self.clustered_lexicon = get_vec
             print('Loaded Lexicon')
 
@@ -326,7 +326,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             m) == self.d_cats, "Length of given mask does not match number of dimensions"
         self.mask = tuple(b for b in m)
 
-        # nn param instead of this
         self.config["hparams"]['mask'] = self.mask
 
     @property
@@ -651,13 +650,9 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
                         mask = torch.BoolTensor(
                             np.tile(self.mask, (category_logits.shape[0], category_logits.shape[1], 1))).to(self.device)
-                        # mask = torch.BoolTensor(self.mask).repeat(
-                        #     category_logits.shape[0], category_logits.shape[1], 1)
                         category_logits = category_logits.masked_fill(
                             mask, -1e9)
                         b, w, d = category_logits.shape
-                        # category_logits = category_logits.reshape(
-                        #     b, w, self.tags_per_word, d // self.tags_per_word)
                         if tau > 0:
                             cats = F.gumbel_softmax(
                                 category_logits, dim=-1, tau=tau, hard=True)
@@ -666,8 +661,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
                             max_idx = torch.argmax(category_logits, dim=-1)
                             cats = F.one_hot(max_idx, num_classes=self.d_cats).type(
                                 torch.FloatTensor).to(self.output_device)
-                            # cats = F.one_hot(max_idx, num_classes=self.d_cats // self.tags_per_word).type(
-                            #     torch.FloatTensor).to(self.output_device)
 
                         if return_cat_logits:
                             category_ret = category_logits  # .reshape(b, w, d)
@@ -813,7 +806,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
 
         # give this tag the same probability of being chosen as original
         self.project_in.weight.data[copy_idx] = self.project_in.weight.data[original_idx]
-        # add noise ?
 
         # give this tag the same features for the end transformer
         self.project_out.weight.data[:,
@@ -834,7 +826,6 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             commit_loss = 0.0
 
         if self.back_cycle and cats is not None:
-            # print('span loss: ', span_loss.data.cpu().numpy(), end=' | ')
             if self.back_use_gold_trees:
                 if self.d_cats > 0:
                     back_loss = self.tetra_to_tags(batch, cats)
@@ -882,11 +873,10 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         loss += self.back_criterion(
             cats[batch["valid_token_mask"].to(self.device)], logits[batch["tetra_tags_mask"].to(self.device)]) / 2
 
-        # is it right for cats to be after the gumbel softmax? use logits v logits
 
         # for later -- use this as a prior for inference
-        if np.random.random() < 0.001:
-            print('back loss: ', loss.data.cpu().numpy())
+        # if np.random.random() < 0.001:
+        #     print('back loss: ', loss.data.cpu().numpy())
 
         return self.back_loss_constant * loss
 

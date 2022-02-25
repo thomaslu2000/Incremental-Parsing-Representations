@@ -24,7 +24,7 @@ def ptb_unescape(words):
         word = PTB_UNESCAPE_MAPPING.get(word, word)
         # This un-escaping for / and * was not yet added for the
         # parser version in https://arxiv.org/abs/1812.11760v1
-        # and related model releases (e.g. benepar_en2)
+        # and related model releases (e.g. benepar2_en2)
         word = word.replace("\\/", "/").replace("\\*", "*")
         # Mid-token punctuation occurs in biomedical text
         word = word.replace("-LSB-", "[").replace("-RSB-", "]")
@@ -48,7 +48,8 @@ def guess_space_after_non_english(escaped_words):
         ):
             sp_after[i - 1] = False
         if (
-            word.endswith("-") and not any(word.endswith(x) for x in PTB_DASH_ESCAPED)
+            word.endswith("-") and not any(word.endswith(x)
+                                           for x in PTB_DASH_ESCAPED)
         ) or any(word.endswith(x) for x in NO_SPACE_AFTER):
             sp_after[i] = False
 
@@ -76,7 +77,8 @@ def guess_space_after(escaped_words, for_english=True):
         ):
             sp_after[i - 1] = False
         if (
-            word.endswith("-") and not any(word.endswith(x) for x in PTB_DASH_ESCAPED)
+            word.endswith("-") and not any(word.endswith(x)
+                                           for x in PTB_DASH_ESCAPED)
         ) or any(word.endswith(x) for x in NO_SPACE_AFTER):
             sp_after[i] = False
 

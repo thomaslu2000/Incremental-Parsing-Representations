@@ -3,15 +3,15 @@ sys.path.append("../src")
 import torch
 import torch.nn.functional as F
 import evaluate
-from benepar2 import decode_chart
-from benepar2 import nkutil
-from benepar2 import parse_chart
+from benepar import decode_chart
+from benepar import nkutil
+from benepar import parse_chart
 from tree_transforms import collapse_unlabel_binarize
 import treebanks
 from treebanks import ParsingExample, Treebank
 import numpy as np
 from nltk.tree import Tree
-from benepar2 import tetra_tag
+from benepar import tetra_tag
 
 
 class IParser():
@@ -46,8 +46,7 @@ class IParser():
         tree, cats = self.parser.parse(treebank, return_cats=True, tau=0)[0]
         if self.parser.tags_per_word > 1:
             w, d = cats.shape
-            cats = cats.reshape(w, self.parser.tags_per_word,
-                                d // self.parser.tags_per_word)
+            cats = cats
         cats = cats.argmax(-1).cpu().numpy().tolist()
         self.remove_pos(tree)
         for i in range(len(tree.leaves())):

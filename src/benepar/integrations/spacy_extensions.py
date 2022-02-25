@@ -35,7 +35,8 @@ def get_constituent(span):
             break
 
     if found_position is None:
-        raise NonConstituentException("Span is not a constituent: {}".format(span))
+        raise NonConstituentException(
+            "Span is not a constituent: {}".format(span))
     return constituent_data, found_position
 
 
@@ -153,23 +154,23 @@ def install_spacy_extensions():
     from spacy.tokens import Doc, Span, Token
 
     # None is not allowed as a default extension value!
-    Doc.set_extension("_constituent_data", default=NOT_PARSED_SENTINEL)
+    Doc.set_extension("_constituent_data2", default=NOT_PARSED_SENTINEL)
 
-    Span.set_extension("labels", getter=get_labels)
-    Span.set_extension("parse_string", getter=parse_string)
-    Span.set_extension("constituents", getter=get_subconstituents)
-    Span.set_extension("parent", getter=get_parent_span)
-    Span.set_extension("children", getter=get_child_spans)
+    Span.set_extension("labels2", getter=get_labels)
+    Span.set_extension("parse_string2", getter=parse_string)
+    Span.set_extension("constituents2", getter=get_subconstituents)
+    Span.set_extension("parent2", getter=get_parent_span)
+    Span.set_extension("children2", getter=get_child_spans)
 
     Token.set_extension(
-        "labels", getter=lambda token: get_labels(token.doc[token.i : token.i + 1])
+        "labels2", getter=lambda token: get_labels(token.doc[token.i: token.i + 1])
     )
     Token.set_extension(
-        "parse_string",
-        getter=lambda token: parse_string(token.doc[token.i : token.i + 1]),
+        "parse_string2",
+        getter=lambda token: parse_string(token.doc[token.i: token.i + 1]),
     )
     Token.set_extension(
-        "parent", getter=lambda token: get_parent_span(token.doc[token.i : token.i + 1])
+        "parent2", getter=lambda token: get_parent_span(token.doc[token.i: token.i + 1])
     )
 
 
