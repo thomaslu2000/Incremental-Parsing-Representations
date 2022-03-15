@@ -79,7 +79,8 @@ def make_hparams():
         step_decay_patience=5,
         max_consecutive_decays=3,  # establishes a termination criterion
         # Clustered Lexicon
-        use_clustered_lexicon='',
+        use_ft_clustered_lexicon='',
+        use_w2v_clustered_lexicon='',
         # CharLSTM
         use_chars_lstm=False,
         d_char_emb=64,
