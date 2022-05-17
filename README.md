@@ -1,6 +1,8 @@
 # Incremental Parsing Representations
 
-A high-accuracy parser with models for 11 languages, implemented in Python. Based on [Learned Incremental Representations for Parsing](https://aclanthology.org/2022.acl-long.220.pdf) from ACL 2022, which is build upon the works of [Constituency Parsing with a Self-Attentive Encoder](https://arxiv.org/abs/1805.01052) from ACL 2018, and with additional changes described in [Multilingual Constituency Parsing with Self-Attention and Pre-Training](https://arxiv.org/abs/1812.11760).
+A high-accuracy incremental parser implemented in Python. Based on [Learned Incremental Representations for Parsing](https://aclanthology.org/2022.acl-long.220.pdf) from ACL 2022, which is build upon the works of [Constituency Parsing with a Self-Attentive Encoder](https://arxiv.org/abs/1805.01052) from ACL 2018, and with additional changes described in [Multilingual Constituency Parsing with Self-Attention and Pre-Training](https://arxiv.org/abs/1812.11760).
+
+
 
 ## Contents
 1. [Training](#training)
