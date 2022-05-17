@@ -43,11 +43,11 @@ class VectorQuantize(nn.Module):
 
         self.wait_steps_remaining = wait_steps
         self.observe_steps_remaining = observe_steps
-        # self.clustering_model = Streamkm(
-        #     coresetsize=n_embed * coreset_size_multiplier,
-        #     length=1500000,
-        #     seed=42,
-        # )
+        self.clustering_model = Streamkm(
+            coresetsize=n_embed * coreset_size_multiplier,
+            length=1500000,
+            seed=42,
+        )
         self.data_chunks = []
 
     def stream_cluster(self, input, expected_num_tokens=None):
