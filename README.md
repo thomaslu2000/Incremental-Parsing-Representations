@@ -21,6 +21,7 @@ Training requires cloning this repository from GitHub. While the model code in `
 * [pytokenizations](https://github.com/tamuhey/tokenizations/) 0.7.2 or compatible.
 * [EVALB](http://nlp.cs.nyu.edu/evalb/). Before starting, run `make` inside the `EVALB/` directory to compile an `evalb` executable. This will be called from Python for evaluation. If training on the SPMRL datasets, you will need to run `make` inside the `EVALB_SPMRL/` directory instead.
 * [clusopt](https://github.com/giuliano-oliveira/clusopt)
+* [torch_struct](http://nlp.seas.harvard.edu/pytorch-struct/)
 
 ### Training Instructions
 
