@@ -81,7 +81,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
         self.pretrained_model = None
 
         # try:
-        if hparams.use_w2v_clustered_lexicon:
+        if hasattr(hparams, 'use_w2v_clustered_lexicon') and hparams.use_w2v_clustered_lexicon:
             from gensim.models import KeyedVectors
             print('Using Word2Vec')
             clustered_lexicon = KeyedVectors.load_word2vec_format(hparams.use_w2v_clustered_lexicon)
@@ -93,7 +93,7 @@ class ChartParser(nn.Module, parse_base.BaseParser):
             self.clustered_lexicon = get_vec
             print('Loaded Lexicon')
 
-        elif hparams.use_ft_clustered_lexicon:
+        elif hasattr(hparams, 'use_ft_clustered_lexicon') and hparams.use_ft_clustered_lexicon:
             print('Using FastText')
             from gensim.models.fasttext import load_facebook_model
             clustered_lexicon = load_facebook_model(hparams.use_ft_clustered_lexicon)
