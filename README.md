@@ -12,7 +12,7 @@ If you are primarily interested in training your own parsing models, skip to the
 
 ## Training
 
-Training requires cloning this repository from GitHub. While the model code in `src/benepar` is distributed in the `benepar` package on PyPI, the training and evaluation scripts directly under `src/` are not.
+Training requires cloning this repository from GitHub. While the model code in `src/benepar` is based on the `benepar` package on PyPI, much of the related code and training and evaluation scripts directly under `src/` are not.
 
 #### Software Requirements for Training
 * Python 3.7 or higher.
