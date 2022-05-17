@@ -1,6 +1,6 @@
 # Incremental Parsing Representations
 
-A high-accuracy parser with models for 11 languages, implemented in Python. Based on [Learned Incremental Representations for Parsing] from ACL 2022, which is build upon the works of [Constituency Parsing with a Self-Attentive Encoder](https://arxiv.org/abs/1805.01052) from ACL 2018, and with additional changes described in [Multilingual Constituency Parsing with Self-Attention and Pre-Training](https://arxiv.org/abs/1812.11760).
+A high-accuracy parser with models for 11 languages, implemented in Python. Based on [Learned Incremental Representations for Parsing](https://aclanthology.org/2022.acl-long.220.pdf) from ACL 2022, which is build upon the works of [Constituency Parsing with a Self-Attentive Encoder](https://arxiv.org/abs/1805.01052) from ACL 2018, and with additional changes described in [Multilingual Constituency Parsing with Self-Attention and Pre-Training](https://arxiv.org/abs/1812.11760).
 
 ## Contents
 1. [Training](#training)
@@ -89,7 +89,24 @@ python src/main.py test --model-path models/en_bert_base_dev=*.pt
 See [`EXPERIMENTS.md`](EXPERIMENTS.md) for instructions on how to reproduce experiments reported in our ACL 2022 paper.
 
 ## Citation
-To Be Completed
+Our paper can be cited as follows:
+
+```
+@inproceedings{kitaev-etal-2022-learned,
+    title = "Learned Incremental Representations for Parsing",
+    author = "Kitaev, Nikita  and
+      Lu, Thomas  and
+      Klein, Dan",
+    booktitle = "Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+    month = may,
+    year = "2022",
+    address = "Dublin, Ireland",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2022.acl-long.220",
+    pages = "3086--3095",
+    abstract = "We present an incremental syntactic representation that consists of assigning a single discrete label to each word in a sentence, where the label is predicted using strictly incremental processing of a prefix of the sentence, and the sequence of labels for a sentence fully determines a parse tree. Our goal is to induce a syntactic representation that commits to syntactic choices only as they are incrementally revealed by the input, in contrast with standard representations that must make output choices such as attachments speculatively and later throw out conflicting analyses. Our learned representations achieve 93.72 F1 on the Penn Treebank with as few as 5 bits per word, and at 8 bits per word they achieve 94.97 F1, which is comparable with other state of the art parsing models when using the same pre-trained embeddings. We also provide an analysis of the representations learned by our system, investigating properties such as the interpretable syntactic features captured by the system and mechanisms for deferred resolution of syntactic ambiguities.",
+}
+```
 
 ## Credits
 
