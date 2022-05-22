@@ -2,6 +2,9 @@
 
 A high-accuracy incremental parser implemented in Python. Based on [Learned Incremental Representations for Parsing](https://aclanthology.org/2022.acl-long.220.pdf) from ACL 2022, which is built upon the works of [Constituency Parsing with a Self-Attentive Encoder](https://arxiv.org/abs/1805.01052) from ACL 2018, and with additional changes described in [Multilingual Constituency Parsing with Self-Attention and Pre-Training](https://arxiv.org/abs/1812.11760).
 
+## Notebooks
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1X99Vbz9pWv1-w-wZoCHzknYl_EU_GXZc?usp=sharing) This notebook gives an example of inference using the model we trained for our paper.
 
 
 ## Contents
