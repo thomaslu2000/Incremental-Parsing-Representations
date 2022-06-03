@@ -13,12 +13,10 @@ import numpy as np
 
 def split(*data, costs, max_cost):
     """Splits a batch of input items into sub-batches.
-
     Args:
         *data: One or more lists of input items, all of the same length
         costs: A list of costs for each item
         max_cost: Maximum total cost for each sub-batch
-
     Yields:
         (example_ids, *subbatch_data) tuples.
     """
@@ -31,9 +29,8 @@ def split(*data, costs, max_cost):
             subbatch_size * costs[costs_argsort[subbatch_size]] > max_cost
         ):
             subbatch_item_ids = costs_argsort[:subbatch_size]
-            yield subbatch_item_ids, *[
-                [items[i] for i in subbatch_item_ids] for items in data
-            ]
+            subbatch_data = [[items[i] for i in subbatch_item_ids] for items in data]
+            yield (subbatch_item_ids,) + tuple(subbatch_data)
             costs_argsort = costs_argsort[subbatch_size:]
             subbatch_size = 1
         else:
